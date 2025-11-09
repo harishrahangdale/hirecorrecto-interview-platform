@@ -103,8 +103,11 @@ router.post('/login', loginLimiter, [
 
     const { email, password } = req.body;
 
-    // Find user
-    const user = await User.findOne({ email });
+    // Normalize email for lookup (handle case insensitivity)
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Find user by normalized email
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
@@ -118,19 +121,29 @@ router.post('/login', loginLimiter, [
         // Dynamically load Invitation model only when needed
         const Invitation = getInvitationModel();
         if (Invitation) {
+          // Temporary passwords are stored in uppercase, but user might type in any case
+          // Compare case-insensitively
+          const passwordUpper = password.toUpperCase().trim();
+          
           // Check if password matches any active invitation's temporary password
           // Check both by candidateId and candidateEmail to handle all cases
           const invitation = await Invitation.findOne({
             $or: [
               { candidateId: user._id },
-              { candidateEmail: user.email.toLowerCase() }
+              { candidateEmail: normalizedEmail }
             ],
-            temporaryPassword: password,
+            temporaryPassword: passwordUpper, // Compare with uppercase version
             status: { $in: ['pending', 'accepted'] },
             expiresAt: { $gt: new Date() }
           });
           
           if (invitation) {
+            console.log('Found matching invitation for candidate login:', {
+              email: normalizedEmail,
+              invitationId: invitation._id,
+              status: invitation.status
+            });
+            
             // Mark invitation as accepted if it's still pending
             if (invitation.status === 'pending') {
               invitation.status = 'accepted';
@@ -138,6 +151,13 @@ router.post('/login', loginLimiter, [
               await invitation.save();
             }
             isMatch = true; // Allow login with temporary password
+          } else {
+            console.log('No matching invitation found:', {
+              email: normalizedEmail,
+              candidateId: user._id,
+              passwordProvided: password,
+              passwordUpper: passwordUpper
+            });
           }
         }
         // If model can't be loaded, just continue with regular password check
