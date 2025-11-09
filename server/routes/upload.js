@@ -3,41 +3,50 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const storageService = require('../services/storage');
 
 const router = express.Router();
 
-// Ensure uploads directory exists
-const uploadDir = process.env.UPLOAD_DIR || './uploads';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+// Configure multer based on storage backend
+const storageBackend = process.env.STORAGE_BACKEND || 'local';
+
+let multerStorage;
+if (storageBackend === 's3') {
+  // Use memory storage for S3 (upload to memory, then to S3)
+  multerStorage = multer.memoryStorage();
+} else {
+  // Use disk storage for local filesystem
+  const uploadDir = process.env.UPLOAD_DIR || './uploads';
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+
+  multerStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+      const interviewId = req.params.interviewId;
+      const questionId = req.params.questionId;
+      
+      if (!interviewId || !questionId) {
+        return cb(new Error('Interview ID and Question ID are required'), null);
+      }
+      
+      const uploadPath = path.join(uploadDir, interviewId, questionId);
+      
+      if (!fs.existsSync(uploadPath)) {
+        fs.mkdirSync(uploadPath, { recursive: true });
+      }
+      
+      cb(null, uploadPath);
+    },
+    filename: (req, file, cb) => {
+      const uniqueName = `${uuidv4()}-${Date.now()}${path.extname(file.originalname)}`;
+      cb(null, uniqueName);
+    }
+  });
 }
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const interviewId = req.params.interviewId;
-    const questionId = req.params.questionId;
-    
-    if (!interviewId || !questionId) {
-      return cb(new Error('Interview ID and Question ID are required'), null);
-    }
-    
-    const uploadPath = path.join(uploadDir, interviewId, questionId);
-    
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
-    }
-    
-    cb(null, uploadPath);
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = `${uuidv4()}-${Date.now()}${path.extname(file.originalname)}`;
-    cb(null, uniqueName);
-  }
-});
-
 const upload = multer({
-  storage: storage,
+  storage: multerStorage,
   limits: {
     fileSize: 100 * 1024 * 1024, // 100MB limit
     files: 1
@@ -61,18 +70,16 @@ router.get('/url/:interviewId/:questionId', (req, res) => {
     const { interviewId, questionId } = req.params;
     const uploadId = uuidv4();
     
-    // In a real implementation, you might want to:
-    // 1. Generate a signed URL for cloud storage (S3, Azure, etc.)
-    // 2. Set expiration time
-    // 3. Validate permissions
-    
+    // For S3, you could generate a presigned URL here
+    // For now, return the standard upload endpoint
     const uploadUrl = `/api/upload/${interviewId}/${questionId}`;
     
     res.json({
       uploadUrl,
       uploadId,
       maxFileSize: 100 * 1024 * 1024, // 100MB
-      allowedTypes: ['video/webm', 'video/mp4', 'video/avi', 'video/mov']
+      allowedTypes: ['video/webm', 'video/mp4', 'video/avi', 'video/mov'],
+      storageBackend: storageBackend
     });
   } catch (error) {
     console.error('Generate upload URL error:', error);
@@ -81,7 +88,7 @@ router.get('/url/:interviewId/:questionId', (req, res) => {
 });
 
 // Upload video file (question-specific or full session)
-router.post('/:interviewId/:questionId', upload.single('video'), (req, res) => {
+router.post('/:interviewId/:questionId', upload.single('video'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: 'No video file uploaded' });
@@ -90,112 +97,105 @@ router.post('/:interviewId/:questionId', upload.single('video'), (req, res) => {
     const { interviewId, questionId } = req.params;
     const isFullSession = req.body.isFullSession === 'true' || req.body.isFullSession === true;
     
-    // Return absolute URL for better compatibility with video players
-    const baseUrl = process.env.API_URL || req.protocol + '://' + req.get('host');
+    let uploadResult;
     
-    // For full session videos, store in a special directory
-    if (isFullSession) {
-      const fullSessionPath = path.join(uploadDir, interviewId, 'full-session');
-      if (!fs.existsSync(fullSessionPath)) {
-        fs.mkdirSync(fullSessionPath, { recursive: true });
+    if (storageBackend === 's3') {
+      // Upload to S3 from memory buffer
+      uploadResult = await storageService.uploadFile(
+        req.file.buffer,
+        interviewId,
+        questionId,
+        req.file.originalname,
+        isFullSession
+      );
+    } else {
+      // Local storage - file already saved by multer
+      const baseUrl = process.env.API_URL || req.protocol + '://' + req.get('host');
+      
+      if (isFullSession) {
+        const uploadDir = process.env.UPLOAD_DIR || './uploads';
+        const fullSessionPath = path.join(uploadDir, interviewId, 'full-session');
+        if (!fs.existsSync(fullSessionPath)) {
+          fs.mkdirSync(fullSessionPath, { recursive: true });
+        }
+        
+        // Move file to full-session directory
+        const newPath = path.join(fullSessionPath, req.file.filename);
+        fs.renameSync(req.file.path, newPath);
+        
+        uploadResult = {
+          filename: req.file.filename,
+          fileUrl: `${baseUrl}/uploads/${interviewId}/full-session/${req.file.filename}`,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+          isFullSession: true
+        };
+      } else {
+        uploadResult = {
+          filename: req.file.filename,
+          fileUrl: `${baseUrl}/uploads/${interviewId}/${questionId}/${req.file.filename}`,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+          isFullSession: false
+        };
       }
-      
-      // Move file to full-session directory
-      const newPath = path.join(fullSessionPath, req.file.filename);
-      fs.renameSync(req.file.path, newPath);
-      
-      const fileUrl = `${baseUrl}/uploads/${interviewId}/full-session/${req.file.filename}`;
-      
-      return res.json({
-        message: 'Full session video uploaded successfully',
-        fileUrl,
-        filename: req.file.filename,
-        size: req.file.size,
-        mimetype: req.file.mimetype,
-        isFullSession: true
-      });
     }
-    
-    // Regular question-specific video
-    const fileUrl = `${baseUrl}/uploads/${interviewId}/${questionId}/${req.file.filename}`;
     
     res.json({
       message: 'Video uploaded successfully',
-      fileUrl,
-      filename: req.file.filename,
-      size: req.file.size,
-      mimetype: req.file.mimetype,
-      isFullSession: false
+      ...uploadResult
     });
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ message: 'Server error uploading file' });
-  }
-});
-
-// Upload multiple files (for batch uploads)
-router.post('/:interviewId/:questionId/batch', upload.array('videos', 5), (req, res) => {
-  try {
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ message: 'No video files uploaded' });
-    }
-
-    const { interviewId, questionId } = req.params;
-    const uploadedFiles = req.files.map(file => ({
-      fileUrl: `/uploads/${interviewId}/${questionId}/${file.filename}`,
-      filename: file.filename,
-      size: file.size,
-      mimetype: file.mimetype
-    }));
-    
-    res.json({
-      message: 'Videos uploaded successfully',
-      files: uploadedFiles
+    res.status(500).json({ 
+      message: 'Server error uploading file',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
-  } catch (error) {
-    console.error('Batch upload error:', error);
-    res.status(500).json({ message: 'Server error uploading files' });
   }
 });
 
 // Delete uploaded file
-router.delete('/:interviewId/:questionId/:filename', (req, res) => {
+router.delete('/:interviewId/:questionId/:filename', async (req, res) => {
   try {
     const { interviewId, questionId, filename } = req.params;
-    const filePath = path.join(uploadDir, interviewId, questionId, filename);
+    const isFullSession = req.query.isFullSession === 'true';
     
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-      res.json({ message: 'File deleted successfully' });
-    } else {
-      res.status(404).json({ message: 'File not found' });
-    }
+    await storageService.deleteFile(interviewId, questionId, filename, isFullSession);
+    
+    res.json({ message: 'File deleted successfully' });
   } catch (error) {
     console.error('Delete file error:', error);
+    if (error.message === 'File not found') {
+      return res.status(404).json({ message: 'File not found' });
+    }
     res.status(500).json({ message: 'Server error deleting file' });
   }
 });
 
 // Get file info
-router.get('/:interviewId/:questionId/:filename', (req, res) => {
+router.get('/:interviewId/:questionId/:filename', async (req, res) => {
   try {
     const { interviewId, questionId, filename } = req.params;
-    const filePath = path.join(uploadDir, interviewId, questionId, filename);
+    const isFullSession = req.query.isFullSession === 'true';
     
-    if (fs.existsSync(filePath)) {
-      const stats = fs.statSync(filePath);
-      res.json({
-        filename,
-        size: stats.size,
-        created: stats.birthtime,
-        modified: stats.mtime,
-        fileUrl: `/uploads/${interviewId}/${questionId}/${filename}`
-      });
-    } else {
-      res.status(404).json({ message: 'File not found' });
+    const fileInfo = await storageService.getFileInfo(interviewId, questionId, filename, isFullSession);
+    
+    // If S3 and file is private, generate signed URL
+    if (storageBackend === 's3' && fileInfo.storage === 's3') {
+      try {
+        const fileKey = storageService.generateFilePath(interviewId, questionId, filename, isFullSession);
+        fileInfo.signedUrl = await storageService.getSignedUrl(fileKey);
+      } catch (error) {
+        console.warn('Could not generate signed URL:', error.message);
+      }
     }
+    
+    res.json(fileInfo);
   } catch (error) {
     console.error('Get file info error:', error);
+    if (error.message === 'File not found') {
+      return res.status(404).json({ message: 'File not found' });
+    }
     res.status(500).json({ message: 'Server error getting file info' });
   }
 });

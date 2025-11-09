@@ -338,6 +338,22 @@ Comprehensive documentation is available in the `docs/` directory:
 - **[CODEBASE_GUIDE.md](docs/CODEBASE_GUIDE.md)** - Detailed explanation of important codebases
 - **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)** - Deployment instructions for various platforms
 
+## 📦 File Storage
+
+The application supports two storage backends:
+
+- **Local Storage** (default): Files stored on server filesystem
+  - ⚠️ **Not recommended for production** on Render (ephemeral filesystem)
+  - Files are lost when service restarts
+  
+- **AWS S3** (recommended for production): Persistent cloud storage
+  - ✅ Files survive service restarts
+  - ✅ Scalable and reliable
+  - ✅ Cost-effective (~$0.12/month for typical usage)
+  - See [docs/AWS_S3_SETUP.md](docs/AWS_S3_SETUP.md) for setup guide
+
+Configure via `STORAGE_BACKEND` environment variable (`local` or `s3`).
+
 ## 🔒 Security Features
 
 - JWT-based authentication with configurable expiration

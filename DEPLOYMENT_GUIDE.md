@@ -215,11 +215,36 @@ Render fully supports Docker deployment:
 
 ### File Storage
 
-Render's filesystem is **ephemeral** - files uploaded to `./uploads` will be lost when the service restarts. For production, consider:
+⚠️ **IMPORTANT**: Render's filesystem is **ephemeral** - files uploaded to `./uploads` will be lost when the service restarts or spins down (free tier spins down after 15 minutes of inactivity).
 
-- **AWS S3** - Set `STORAGE_BACKEND=s3` and configure S3 credentials
-- **Cloudinary** - For image/video storage
-- **Google Cloud Storage** - Alternative cloud storage
+**Solution: Use AWS S3 for persistent storage**
+
+The application now supports AWS S3 for file storage. This is **highly recommended** for production.
+
+**Quick Setup:**
+1. Create an AWS S3 bucket (see [AWS_S3_SETUP.md](docs/AWS_S3_SETUP.md) for detailed guide)
+2. Create an IAM user with S3 permissions
+3. Add these environment variables in Render:
+   ```env
+   STORAGE_BACKEND=s3
+   AWS_ACCESS_KEY_ID=your_access_key
+   AWS_SECRET_ACCESS_KEY=your_secret_key
+   AWS_REGION=us-east-1
+   AWS_S3_BUCKET=your-bucket-name
+   ```
+
+**Benefits:**
+- ✅ Files survive service restarts
+- ✅ Persistent storage (99.999999999% durability)
+- ✅ Scalable and cost-effective (~$0.12/month for typical usage)
+- ✅ Can use CloudFront CDN for faster delivery
+
+See [docs/AWS_S3_SETUP.md](docs/AWS_S3_SETUP.md) for complete setup instructions.
+
+**Alternative Options:**
+- **Cloudinary** - For media storage (has free tier)
+- **Google Cloud Storage** - Similar to S3
+- **Render Disk** - Persistent disk (paid feature)
 
 ### Socket.IO on Render
 
