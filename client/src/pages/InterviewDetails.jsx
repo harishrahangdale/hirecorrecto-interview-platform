@@ -518,10 +518,9 @@ export default function InterviewDetails() {
                           completed: 'bg-emerald-100 text-emerald-700 border-emerald-200',
                           expired: 'bg-red-100 text-red-700 border-red-200'
                         }
-                        // Can revoke if invitation is pending/accepted and interview hasn't started
-                        const canRevoke = (invitation.status === 'pending' || invitation.status === 'accepted') && 
-                                         interview.status !== 'in_progress' && 
-                                         interview.status !== 'completed'
+                        // Can revoke if invitation is pending or accepted
+                        // Backend will validate if interview has started/completed
+                        const canRevoke = (invitation.status === 'pending' || invitation.status === 'accepted')
                         return (
                           <div key={invitation._id} className="p-3 bg-gray-50 rounded-xl border-2 border-gray-200 hover:border-gray-300 transition-all">
                             <div className="flex items-center justify-between gap-2">
