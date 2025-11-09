@@ -1,5 +1,5 @@
-import React, { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import React, { useState, useEffect } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { interviewAPI } from '../services/api'
 import { ArrowLeft, Plus, Trash2, X, ChevronDown, ChevronUp, Sparkles, Target, Settings, FileText, Zap, Upload, FileCheck } from 'lucide-react'
 import toast from 'react-hot-toast'
@@ -7,7 +7,11 @@ import RichTextEditor from '../components/RichTextEditor'
 
 export default function CreateInterview() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const editId = searchParams.get('edit')
+  const isEditMode = !!editId
   const [loading, setLoading] = useState(false)
+  const [loadingInterview, setLoadingInterview] = useState(isEditMode)
   const [expandedSections, setExpandedSections] = useState({
     basic: true,
     skills: true,
@@ -33,6 +37,105 @@ export default function CreateInterview() {
   const [optionalQuestionsFile, setOptionalQuestionsFile] = useState(null)
   const [mandatoryQuestionsPreview, setMandatoryQuestionsPreview] = useState([]) // Array of {text, skills: []}
   const [optionalQuestionsPreview, setOptionalQuestionsPreview] = useState([]) // Array of {text, skills: []}
+
+  // Load interview data if editing
+  useEffect(() => {
+    if (isEditMode && editId) {
+      const loadInterview = async () => {
+        try {
+          setLoadingInterview(true)
+          const response = await interviewAPI.getById(editId)
+          const interview = response.data.interview
+          
+          if (!interview) {
+            throw new Error('Interview not found')
+          }
+          
+          console.log('Loading interview for edit:', interview)
+          
+          // Helper function to format date for datetime-local input
+          const formatDateForInput = (dateValue) => {
+            if (!dateValue) return ''
+            try {
+              const date = new Date(dateValue)
+              if (isNaN(date.getTime())) return ''
+              // Format as YYYY-MM-DDTHH:mm for datetime-local input
+              const year = date.getFullYear()
+              const month = String(date.getMonth() + 1).padStart(2, '0')
+              const day = String(date.getDate()).padStart(2, '0')
+              const hours = String(date.getHours()).padStart(2, '0')
+              const minutes = String(date.getMinutes()).padStart(2, '0')
+              return `${year}-${month}-${day}T${hours}:${minutes}`
+            } catch (e) {
+              console.error('Error formatting date:', e)
+              return ''
+            }
+          }
+          
+          // Populate form data
+          setFormData({
+            title: interview.title || '',
+            description: interview.description || '',
+            expectedSkills: interview.expectedSkills?.length > 0 
+              ? interview.expectedSkills.map(s => ({
+                  skill: typeof s === 'string' ? s : (s.skill || ''),
+                  topics: Array.isArray(s.topics) ? s.topics : (typeof s === 'object' && s.topics ? [s.topics] : []),
+                  weight: typeof s === 'object' && s.weight !== undefined ? Number(s.weight) : 20
+                }))
+              : [{ skill: '', topics: [], weight: 20 }],
+            experienceRange: interview.experienceRange || 'mid',
+            dateWindow: {
+              start: formatDateForInput(interview.dateWindow?.start),
+              end: formatDateForInput(interview.dateWindow?.end)
+            },
+            passPercentage: Number(interview.passPercentage) || 70,
+            duration: Number(interview.duration) || 30,
+            maxQuestions: Number(interview.maxQuestions) || 5,
+            mandatoryWeightage: Number(interview.mandatoryWeightage) || 0,
+            optionalWeightage: Number(interview.optionalWeightage) || 0
+          })
+          
+          // Set questions preview
+          if (interview.mandatoryQuestions && Array.isArray(interview.mandatoryQuestions) && interview.mandatoryQuestions.length > 0) {
+            setMandatoryQuestionsPreview(
+              interview.mandatoryQuestions.map(q => ({
+                text: typeof q === 'string' ? q : (q.text || ''),
+                skills: Array.isArray(q.skills) ? q.skills : []
+              }))
+            )
+          } else {
+            setMandatoryQuestionsPreview([])
+          }
+          
+          if (interview.optionalQuestions && Array.isArray(interview.optionalQuestions) && interview.optionalQuestions.length > 0) {
+            setOptionalQuestionsPreview(
+              interview.optionalQuestions.map(q => ({
+                text: typeof q === 'string' ? q : (q.text || ''),
+                skills: Array.isArray(q.skills) ? q.skills : []
+              }))
+            )
+          } else {
+            setOptionalQuestionsPreview([])
+          }
+        } catch (error) {
+          console.error('Error loading interview:', error)
+          console.error('Error details:', {
+            message: error.message,
+            response: error.response?.data,
+            status: error.response?.status
+          })
+          toast.error(error.response?.data?.message || error.message || 'Failed to load interview data')
+          // Don't navigate away immediately, let user see the error
+          setTimeout(() => {
+            navigate('/')
+          }, 2000)
+        } finally {
+          setLoadingInterview(false)
+        }
+      }
+      loadInterview()
+    }
+  }, [isEditMode, editId, navigate])
 
   const toggleSection = (section) => {
     setExpandedSections(prev => ({
@@ -317,7 +420,14 @@ export default function CreateInterview() {
       formDataToSend.append('title', formData.title)
       formDataToSend.append('description', formData.description)
       formDataToSend.append('experienceRange', formData.experienceRange)
-      formDataToSend.append('dateWindow', JSON.stringify(formData.dateWindow))
+      
+      // Convert datetime-local format to ISO string for dateWindow
+      const dateWindowToSend = {
+        start: formData.dateWindow.start ? new Date(formData.dateWindow.start).toISOString() : '',
+        end: formData.dateWindow.end ? new Date(formData.dateWindow.end).toISOString() : ''
+      }
+      formDataToSend.append('dateWindow', JSON.stringify(dateWindowToSend))
+      
       formDataToSend.append('passPercentage', formData.passPercentage)
       formDataToSend.append('duration', formData.duration)
       formDataToSend.append('maxQuestions', formData.maxQuestions)
@@ -333,9 +443,17 @@ export default function CreateInterview() {
         formDataToSend.append('optionalQuestions', JSON.stringify(optionalQuestionsPreview))
       }
       
-      const response = await interviewAPI.createWithFiles(formDataToSend)
-      toast.success('Interview created successfully!')
-      navigate(`/interview/${response.data.interview.id}`)
+      if (isEditMode && editId) {
+        // Update existing interview
+        const response = await interviewAPI.update(editId, formDataToSend)
+        toast.success('Interview updated successfully!')
+        navigate(`/interview/${editId}`)
+      } else {
+        // Create new interview
+        const response = await interviewAPI.createWithFiles(formDataToSend)
+        toast.success('Interview created successfully!')
+        navigate(`/interview/${response.data.interview.id}`)
+      }
     } catch (error) {
       console.error('Error creating interview:', error)
       toast.error(error.response?.data?.message || 'Failed to create interview')
@@ -346,6 +464,17 @@ export default function CreateInterview() {
 
   const totalWeight = formData.expectedSkills.reduce((sum, skill) => sum + skill.weight, 0)
   const weightError = Math.abs(totalWeight - 100) > 0.01
+
+  if (loadingInterview) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-50 via-white to-purple-50">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading interview data...</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50">
@@ -372,8 +501,14 @@ export default function CreateInterview() {
               <Sparkles className="h-8 w-8 text-white" />
             </div>
             <div>
-              <h1 className="text-4xl font-bold text-gray-900 mb-2">Create New Interview</h1>
-              <p className="text-gray-600 text-lg">Set up a new interview template for candidates</p>
+              <h1 className="text-4xl font-bold text-gray-900 mb-2">
+                {isEditMode ? 'Edit Interview' : 'Create New Interview'}
+              </h1>
+              <p className="text-gray-600 text-lg">
+                {isEditMode 
+                  ? 'Update interview template details' 
+                  : 'Set up a new interview template for candidates'}
+              </p>
             </div>
           </div>
         </div>
@@ -1024,7 +1159,9 @@ export default function CreateInterview() {
               disabled={loading || weightError}
               className="px-8 py-3 text-sm font-semibold text-white bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 rounded-xl transition-all shadow-lg hover:shadow-xl transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
             >
-              {loading ? 'Creating...' : 'Create Interview'}
+              {loading 
+                ? (isEditMode ? 'Updating...' : 'Creating...') 
+                : (isEditMode ? 'Update Interview' : 'Create Interview')}
             </button>
           </div>
         </form>

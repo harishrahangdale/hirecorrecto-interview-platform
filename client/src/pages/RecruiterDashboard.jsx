@@ -5,7 +5,8 @@ import { interviewAPI, reportsAPI } from '../services/api'
 import { 
   Plus, Users, Calendar, TrendingUp, Eye, Download, BarChart3, 
   CheckCircle2, Clock, AlertCircle, FileText, Sparkles, 
-  Zap, Target, Award, Activity, ArrowRight, ExternalLink
+  Zap, Target, Award, Activity, ArrowRight, ExternalLink,
+  Globe, Lock, Edit, Trash2
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import LoadingSpinner from '../components/LoadingSpinner'
@@ -60,6 +61,32 @@ export default function RecruiterDashboard() {
     } catch (error) {
       console.error('Export error:', error)
       toast.error('Failed to export interview results')
+    }
+  }
+
+  const handleTogglePublish = async (interviewId, currentStatus) => {
+    try {
+      const response = await interviewAPI.togglePublish(interviewId)
+      toast.success(response.data.message)
+      fetchData()
+    } catch (error) {
+      console.error('Toggle publish error:', error)
+      toast.error(error.response?.data?.message || 'Failed to toggle publish status')
+    }
+  }
+
+  const handleDelete = async (interviewId, interviewTitle) => {
+    if (!window.confirm(`Are you sure you want to delete "${interviewTitle}"? This action cannot be undone.`)) {
+      return
+    }
+
+    try {
+      await interviewAPI.delete(interviewId)
+      toast.success('Interview deleted successfully')
+      fetchData()
+    } catch (error) {
+      console.error('Delete error:', error)
+      toast.error(error.response?.data?.message || 'Failed to delete interview')
     }
   }
 
@@ -456,7 +483,7 @@ export default function RecruiterDashboard() {
                           </div>
                         </td>
                         <td className="px-6 py-5">
-                          <div className="flex items-center space-x-2">
+                          <div className="flex items-center space-x-2 flex-wrap gap-2">
                             <Link
                               to={`/interview/${interview.id}`}
                               className="inline-flex items-center space-x-1 px-3 py-2 bg-indigo-100 hover:bg-indigo-200 text-indigo-700 rounded-lg transition-colors text-sm font-medium"
@@ -465,6 +492,43 @@ export default function RecruiterDashboard() {
                               <Eye className="h-4 w-4" />
                               <span>View</span>
                             </Link>
+                            <Link
+                              to={`/create-interview?edit=${interview.id}`}
+                              className="inline-flex items-center space-x-1 px-3 py-2 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-lg transition-colors text-sm font-medium"
+                              title="Edit Interview"
+                            >
+                              <Edit className="h-4 w-4" />
+                              <span>Edit</span>
+                            </Link>
+                            <button
+                              onClick={() => handleTogglePublish(interview.id, interview.isPublished)}
+                              className={`inline-flex items-center space-x-1 px-3 py-2 rounded-lg transition-colors text-sm font-medium ${
+                                interview.isPublished
+                                  ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-700'
+                                  : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
+                              }`}
+                              title={interview.isPublished ? 'Unpublish Interview' : 'Publish Interview'}
+                            >
+                              {interview.isPublished ? (
+                                <>
+                                  <Globe className="h-4 w-4" />
+                                  <span>Published</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Lock className="h-4 w-4" />
+                                  <span>Unpublished</span>
+                                </>
+                              )}
+                            </button>
+                            <button
+                              onClick={() => handleDelete(interview.id, interview.title)}
+                              className="inline-flex items-center space-x-1 px-3 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg transition-colors text-sm font-medium"
+                              title="Delete Interview"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              <span>Delete</span>
+                            </button>
                             {interview.status === 'completed' && (
                               <>
                                 <Link
@@ -475,7 +539,7 @@ export default function RecruiterDashboard() {
                                   <BarChart3 className="h-4 w-4" />
                                   <span>Results</span>
                                 </Link>
-                                <div className="flex items-center space-x-1 ml-2">
+                                <div className="flex items-center space-x-1">
                                   <button
                                     onClick={() => handleExport(interview.id, 'csv')}
                                     className="p-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg transition-colors"

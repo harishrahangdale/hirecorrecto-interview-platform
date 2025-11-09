@@ -5,7 +5,8 @@ import { interviewAPI, reportsAPI } from '../services/api'
 import { 
   ArrowLeft, Mail, Calendar, Users, Play, Eye, Download, 
   CheckCircle2, Clock, AlertCircle, FileText, Sparkles, 
-  BarChart3, Target, Award, Zap, Brain, ExternalLink, Settings, X, Video
+  BarChart3, Target, Award, Zap, Brain, ExternalLink, Settings, X, Video,
+  Globe, Lock, Edit, Trash2
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import LoadingSpinner from '../components/LoadingSpinner'
@@ -157,6 +158,32 @@ export default function InterviewDetails() {
     } catch (error) {
       console.error('Export error:', error)
       toast.error('Failed to export results')
+    }
+  }
+
+  const handleTogglePublish = async () => {
+    try {
+      const response = await interviewAPI.togglePublish(id)
+      toast.success(response.data.message)
+      fetchInterview()
+    } catch (error) {
+      console.error('Toggle publish error:', error)
+      toast.error(error.response?.data?.message || 'Failed to toggle publish status')
+    }
+  }
+
+  const handleDelete = async () => {
+    if (!window.confirm(`Are you sure you want to delete "${interview.title}"? This action cannot be undone.`)) {
+      return
+    }
+
+    try {
+      await interviewAPI.delete(id)
+      toast.success('Interview deleted successfully')
+      navigate('/')
+    } catch (error) {
+      console.error('Delete error:', error)
+      toast.error(error.response?.data?.message || 'Failed to delete interview')
     }
   }
 
@@ -385,6 +412,44 @@ export default function InterviewDetails() {
                   </div>
                   <h3 className="text-xl font-bold text-gray-900">Actions</h3>
                 </div>
+
+                {/* Publish/Edit/Delete Actions */}
+                <div className="grid grid-cols-1 gap-3 mb-6 pb-6 border-b-2 border-gray-200">
+                  <button
+                    onClick={handleTogglePublish}
+                    className={`w-full flex items-center justify-center space-x-2 px-4 py-3 rounded-xl transition-all font-semibold ${
+                      interview.isPublished
+                        ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-700 border-2 border-emerald-200'
+                        : 'bg-gray-100 hover:bg-gray-200 text-gray-700 border-2 border-gray-200'
+                    }`}
+                  >
+                    {interview.isPublished ? (
+                      <>
+                        <Globe className="h-5 w-5" />
+                        <span>Unpublish Interview</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="h-5 w-5" />
+                        <span>Publish Interview</span>
+                      </>
+                    )}
+                  </button>
+                  <Link
+                    to={`/create-interview?edit=${interview._id || interview.id || id}`}
+                    className="w-full flex items-center justify-center space-x-2 px-4 py-3 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-xl transition-all font-semibold border-2 border-blue-200"
+                  >
+                    <Edit className="h-5 w-5" />
+                    <span>Edit Interview</span>
+                  </Link>
+                  <button
+                    onClick={handleDelete}
+                    className="w-full flex items-center justify-center space-x-2 px-4 py-3 bg-red-100 hover:bg-red-200 text-red-700 rounded-xl transition-all font-semibold border-2 border-red-200"
+                  >
+                    <Trash2 className="h-5 w-5" />
+                    <span>Delete Interview</span>
+                  </button>
+                </div>
                 
                 <form onSubmit={handleInviteCandidate} className="space-y-4 mb-6">
                   <div>
@@ -494,7 +559,7 @@ export default function InterviewDetails() {
                 {interview.status === 'completed' && (
                   <div className="border-t-2 border-gray-200 pt-6 space-y-3 mt-6">
                     <Link
-                      to={`/interview/${interview.id}/results`}
+                      to={`/interview/${interview._id || interview.id || id}/results`}
                       className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white font-semibold py-3 px-4 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all flex items-center justify-center space-x-2"
                     >
                       <BarChart3 className="h-5 w-5" />

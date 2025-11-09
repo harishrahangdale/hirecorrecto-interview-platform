@@ -228,6 +228,10 @@ const interviewSchema = new mongoose.Schema({
     enum: ['draft', 'invited', 'in_progress', 'completed', 'cancelled'],
     default: 'draft'
   },
+  isPublished: {
+    type: Boolean,
+    default: false
+  },
   questions: [questionSchema],
   inviteToken: {
     type: String,

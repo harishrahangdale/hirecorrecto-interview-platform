@@ -219,6 +219,9 @@ router.get('/', async (req, res) => {
     if (req.user.role === 'recruiter') {
       query.recruiterId = req.user._id;
     } else if (req.user.role === 'candidate') {
+      // For candidates, only show published interviews
+      query.isPublished = true;
+      
       // For candidates, check both direct assignment and invitations
       try {
         // First, find all invitations for this candidate
@@ -331,6 +334,36 @@ router.get('/:id/invitations', requireRole(['recruiter']), async (req, res) => {
   }
 });
 
+// Toggle publish status (recruiter only) - MUST come before /:id route
+router.patch('/:id/publish', requireRole(['recruiter']), async (req, res) => {
+  console.log('PATCH /:id/publish route hit', req.params.id);
+  try {
+    const interview = await Interview.findById(req.params.id);
+
+    if (!interview) {
+      return res.status(404).json({ message: 'Interview not found' });
+    }
+
+    if (interview.recruiterId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    interview.isPublished = !interview.isPublished;
+    await interview.save();
+
+    res.json({
+      message: interview.isPublished ? 'Interview published successfully' : 'Interview unpublished successfully',
+      interview: {
+        id: interview._id,
+        isPublished: interview.isPublished
+      }
+    });
+  } catch (error) {
+    console.error('Toggle publish error:', error);
+    res.status(500).json({ message: 'Server error toggling publish status', error: error.message });
+  }
+});
+
 // Revoke invitation (only if interview hasn't started)
 router.delete('/:id/invitations/:invitationId', requireRole(['recruiter']), async (req, res) => {
   try {
@@ -429,6 +462,11 @@ router.get('/:id', async (req, res) => {
         // If invitation check fails, continue with existing check
         console.warn('Error checking invitation for access:', invitationError.message);
       }
+    }
+
+    // For candidates, also check if interview is published
+    if (req.user.role === 'candidate' && !interview.isPublished) {
+      return res.status(403).json({ message: 'This interview is not published yet' });
     }
 
     if (!isRecruiter && !isCandidate) {
@@ -868,6 +906,269 @@ router.post('/:id/questions/:questionId/answer', requireRole(['candidate']), [
   } catch (error) {
     console.error('Submit answer error:', error);
     res.status(500).json({ message: 'Server error submitting answer' });
+  }
+});
+
+// Update interview (recruiter only)
+router.put('/:id', requireRole(['recruiter']), upload.fields([
+  { name: 'mandatoryQuestionsFile', maxCount: 1 },
+  { name: 'optionalQuestionsFile', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const interview = await Interview.findById(req.params.id);
+
+    if (!interview) {
+      return res.status(404).json({ message: 'Interview not found' });
+    }
+
+    if (interview.recruiterId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Check if any candidate has completed this interview
+    const hasCompletedInvitations = await Invitation.exists({
+      interviewId: interview._id,
+      status: 'completed'
+    });
+
+    if (hasCompletedInvitations || interview.status === 'completed') {
+      return res.status(400).json({ 
+        message: 'Cannot edit interview. At least one candidate has completed it.' 
+      });
+    }
+
+    // Handle both JSON and multipart/form-data
+    let bodyData = req.body;
+    
+    // If dateWindow is a string, parse it
+    if (typeof bodyData.dateWindow === 'string') {
+      try {
+        bodyData.dateWindow = JSON.parse(bodyData.dateWindow);
+      } catch (e) {
+        return res.status(400).json({ message: 'Invalid dateWindow format' });
+      }
+    }
+    
+    // If expectedSkills is a string, parse it
+    if (typeof bodyData.expectedSkills === 'string') {
+      try {
+        bodyData.expectedSkills = JSON.parse(bodyData.expectedSkills);
+      } catch (e) {
+        return res.status(400).json({ message: 'Invalid expectedSkills format' });
+      }
+    }
+
+    // Update allowed fields
+    if (bodyData.title !== undefined) {
+      if (!bodyData.title || !bodyData.title.trim()) {
+        return res.status(400).json({ message: 'Title is required' });
+      }
+      interview.title = bodyData.title.trim();
+    }
+
+    if (bodyData.description !== undefined) {
+      if (!bodyData.description || !bodyData.description.trim()) {
+        return res.status(400).json({ message: 'Description is required' });
+      }
+      interview.description = bodyData.description.trim();
+    }
+
+    if (bodyData.expectedSkills !== undefined) {
+      if (!Array.isArray(bodyData.expectedSkills) || bodyData.expectedSkills.length === 0) {
+        return res.status(400).json({ message: 'At least one skill is required' });
+      }
+      interview.expectedSkills = bodyData.expectedSkills;
+    }
+
+    if (bodyData.experienceRange !== undefined) {
+      interview.experienceRange = bodyData.experienceRange;
+    }
+
+    if (bodyData.dateWindow !== undefined) {
+      if (!bodyData.dateWindow.start || !bodyData.dateWindow.end) {
+        return res.status(400).json({ message: 'Date window is required' });
+      }
+      interview.dateWindow = {
+        start: new Date(bodyData.dateWindow.start),
+        end: new Date(bodyData.dateWindow.end)
+      };
+    }
+
+    if (bodyData.passPercentage !== undefined) {
+      interview.passPercentage = parseFloat(bodyData.passPercentage) || 70;
+    }
+
+    if (bodyData.duration !== undefined) {
+      interview.duration = parseInt(bodyData.duration) || 30;
+    }
+
+    if (bodyData.maxQuestions !== undefined) {
+      interview.maxQuestions = parseInt(bodyData.maxQuestions) || 5;
+    }
+
+    // Parse questions with skills
+    let mandatoryQuestions = [];
+    let optionalQuestions = [];
+    
+    if (bodyData.mandatoryQuestions !== undefined) {
+      try {
+        mandatoryQuestions = typeof bodyData.mandatoryQuestions === 'string' 
+          ? JSON.parse(bodyData.mandatoryQuestions)
+          : bodyData.mandatoryQuestions;
+        if (!Array.isArray(mandatoryQuestions)) {
+          return res.status(400).json({ message: 'Invalid mandatory questions format' });
+        }
+        mandatoryQuestions = mandatoryQuestions.map(q => ({
+          text: typeof q === 'string' ? q : (q.text || q),
+          skills: Array.isArray(q.skills) ? q.skills : []
+        }));
+      } catch (e) {
+        return res.status(400).json({ message: 'Invalid mandatory questions JSON format' });
+      }
+    } else {
+      mandatoryQuestions = interview.mandatoryQuestions;
+    }
+    
+    if (bodyData.optionalQuestions !== undefined) {
+      try {
+        optionalQuestions = typeof bodyData.optionalQuestions === 'string'
+          ? JSON.parse(bodyData.optionalQuestions)
+          : bodyData.optionalQuestions;
+        if (!Array.isArray(optionalQuestions)) {
+          return res.status(400).json({ message: 'Invalid optional questions format' });
+        }
+        optionalQuestions = optionalQuestions.map(q => ({
+          text: typeof q === 'string' ? q : (q.text || q),
+          skills: Array.isArray(q.skills) ? q.skills : []
+        }));
+      } catch (e) {
+        return res.status(400).json({ message: 'Invalid optional questions JSON format' });
+      }
+    } else {
+      optionalQuestions = interview.optionalQuestions;
+    }
+    
+    // Validate that all questions have at least one skill assigned
+    const mandatoryWithoutSkills = mandatoryQuestions.filter(q => !q.skills || q.skills.length === 0);
+    const optionalWithoutSkills = optionalQuestions.filter(q => !q.skills || q.skills.length === 0);
+    
+    if (mandatoryWithoutSkills.length > 0) {
+      return res.status(400).json({ 
+        message: `${mandatoryWithoutSkills.length} mandatory question(s) have no skills assigned. Please assign skills to all questions.`
+      });
+    }
+    
+    if (optionalWithoutSkills.length > 0) {
+      return res.status(400).json({ 
+        message: `${optionalWithoutSkills.length} optional question(s) have no skills assigned. Please assign skills to all questions.`
+      });
+    }
+
+    // Validate weightage if questions are uploaded
+    const mandatoryWeightage = bodyData.mandatoryWeightage !== undefined 
+      ? parseFloat(bodyData.mandatoryWeightage) || 0 
+      : interview.mandatoryWeightage;
+    const optionalWeightage = bodyData.optionalWeightage !== undefined
+      ? parseFloat(bodyData.optionalWeightage) || 0
+      : interview.optionalWeightage;
+    
+    if ((mandatoryQuestions.length > 0 || optionalQuestions.length > 0)) {
+      const totalWeightage = mandatoryWeightage + optionalWeightage;
+      if (Math.abs(totalWeightage - 100) > 0.01) {
+        return res.status(400).json({ 
+          message: 'Mandatory and optional question weightage must sum to 100%',
+          currentSum: totalWeightage
+        });
+      }
+    }
+
+    // Validate skill weights sum to 100%
+    if (bodyData.expectedSkills !== undefined) {
+      const totalWeight = bodyData.expectedSkills.reduce((sum, skill) => sum + (parseFloat(skill.weight) || 0), 0);
+      if (Math.abs(totalWeight - 100) > 0.01) {
+        return res.status(400).json({ 
+          message: 'Skill weights must sum to 100%',
+          currentSum: totalWeight
+        });
+      }
+    }
+
+    interview.mandatoryQuestions = mandatoryQuestions;
+    interview.optionalQuestions = optionalQuestions;
+    interview.mandatoryWeightage = mandatoryWeightage;
+    interview.optionalWeightage = optionalWeightage;
+
+    await interview.save();
+
+    res.json({
+      message: 'Interview updated successfully',
+      interview: {
+        id: interview._id,
+        title: interview.title,
+        description: interview.description,
+        expectedSkills: interview.expectedSkills,
+        experienceRange: interview.experienceRange,
+        dateWindow: interview.dateWindow,
+        passPercentage: interview.passPercentage,
+        duration: interview.duration,
+        maxQuestions: interview.maxQuestions,
+        mandatoryQuestions: interview.mandatoryQuestions,
+        optionalQuestions: interview.optionalQuestions,
+        mandatoryWeightage: interview.mandatoryWeightage,
+        optionalWeightage: interview.optionalWeightage,
+        status: interview.status,
+        isPublished: interview.isPublished,
+        updatedAt: interview.updatedAt
+      }
+    });
+  } catch (error) {
+    console.error('Update interview error:', error);
+    res.status(500).json({ message: 'Server error updating interview', error: error.message });
+  }
+});
+
+// Delete interview (recruiter only)
+router.delete('/:id', requireRole(['recruiter']), async (req, res) => {
+  try {
+    const interview = await Interview.findById(req.params.id);
+
+    if (!interview) {
+      return res.status(404).json({ message: 'Interview not found' });
+    }
+
+    if (interview.recruiterId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Check if any candidate has completed this interview
+    const completedInvitations = await Invitation.find({
+      interviewId: interview._id,
+      status: 'completed'
+    });
+
+    if (completedInvitations.length > 0 || interview.status === 'completed') {
+      return res.status(400).json({ 
+        message: 'Cannot delete interview. At least one candidate has completed it.',
+        completedCount: completedInvitations.length
+      });
+    }
+
+    // Delete all invitations for this interview
+    await Invitation.deleteMany({ interviewId: interview._id });
+
+    // Delete the interview
+    await Interview.findByIdAndDelete(interview._id);
+
+    res.json({
+      message: 'Interview deleted successfully',
+      deletedInterview: {
+        id: interview._id,
+        title: interview.title
+      }
+    });
+  } catch (error) {
+    console.error('Delete interview error:', error);
+    res.status(500).json({ message: 'Server error deleting interview', error: error.message });
   }
 });
 

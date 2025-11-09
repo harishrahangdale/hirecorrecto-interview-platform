@@ -74,6 +74,19 @@ export const interviewAPI = {
   }),
   getAll: () => api.get('/interviews'),
   getById: (id) => api.get(`/interviews/${id}`),
+  update: (id, interviewData) => {
+    // Handle both JSON and FormData
+    if (interviewData instanceof FormData) {
+      return api.put(`/interviews/${id}`, interviewData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      })
+    }
+    return api.put(`/interviews/${id}`, interviewData)
+  },
+  delete: (id) => api.delete(`/interviews/${id}`),
+  togglePublish: (id) => api.patch(`/interviews/${id}/publish`),
   inviteCandidate: (id, candidateEmail, firstName, lastName) => {
     const payload = { candidateEmail }
     if (firstName) payload.firstName = firstName
