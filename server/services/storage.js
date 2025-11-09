@@ -1,4 +1,3 @@
-const AWS = require('aws-sdk');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
@@ -15,6 +14,18 @@ class StorageService {
   }
 
   initializeS3() {
+    // Lazy load AWS SDK only when S3 is used
+    let AWS;
+    try {
+      AWS = require('aws-sdk');
+    } catch (error) {
+      console.error('aws-sdk not installed. Install it with: npm install aws-sdk');
+      console.warn('Falling back to local storage.');
+      this.backend = 'local';
+      this.initializeLocal();
+      return;
+    }
+    
     // Configure AWS S3
     this.s3 = new AWS.S3({
       accessKeyId: process.env.AWS_ACCESS_KEY_ID,
