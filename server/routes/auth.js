@@ -127,13 +127,14 @@ router.post('/login', loginLimiter, [
           
           // Check if password matches any active invitation's temporary password
           // Check both by candidateId and candidateEmail to handle all cases
+          // Include 'started' status as candidates may need to login again during interview
           const invitation = await Invitation.findOne({
             $or: [
               { candidateId: user._id },
               { candidateEmail: normalizedEmail }
             ],
             temporaryPassword: passwordUpper, // Compare with uppercase version
-            status: { $in: ['pending', 'accepted'] },
+            status: { $in: ['pending', 'accepted', 'started'] }, // Allow login even if interview started
             expiresAt: { $gt: new Date() }
           });
           
