@@ -5,9 +5,12 @@ server/node_modules/
 
 # Environment variables
 .env
+.env.*
 .env.local
 .env.production
 .env.development
+*.bak
+*.backup
 
 # Build outputs
 client/dist/
