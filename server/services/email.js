@@ -1,5 +1,20 @@
 const nodemailer = require('nodemailer');
 
+/**
+ * Normalizes a base URL by removing trailing slashes
+ * and constructs a full URL with a path
+ * @param {string} baseUrl - Base URL (e.g., http://localhost:5173 or https://app.netlify.app)
+ * @param {string} path - Path to append (e.g., /interview/token)
+ * @returns {string} Normalized full URL
+ */
+function normalizeUrl(baseUrl, path) {
+  // Remove trailing slashes from base URL
+  const normalizedBase = (baseUrl || '').replace(/\/+$/, '');
+  // Ensure path starts with a slash
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${normalizedBase}${normalizedPath}`;
+}
+
 class EmailService {
   constructor() {
     this.transporter = null;
@@ -52,7 +67,9 @@ class EmailService {
       throw new Error('Email service not configured. Please set SMTP credentials in environment variables (SMTP_HOST, SMTP_USER, SMTP_PASS).');
     }
 
-    const inviteUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/interview/${inviteToken}`;
+    // Normalize URL to handle trailing slashes in CLIENT_URL
+    const baseUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+    const inviteUrl = normalizeUrl(baseUrl, `/interview/${inviteToken}`);
     
     const htmlContent = this.getInviteEmailHTML(interviewTitle, inviteUrl);
     const textContent = this.getInviteEmailText(interviewTitle, inviteUrl);
@@ -87,8 +104,10 @@ class EmailService {
       throw new Error('Email service not configured. Please set SMTP credentials in environment variables (SMTP_HOST, SMTP_USER, SMTP_PASS).');
     }
 
-    const loginUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/login`;
-    const inviteUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/interview/${inviteToken}`;
+    // Normalize URLs to handle trailing slashes in CLIENT_URL
+    const baseUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+    const loginUrl = normalizeUrl(baseUrl, '/login');
+    const inviteUrl = normalizeUrl(baseUrl, `/interview/${inviteToken}`);
     
     const htmlContent = this.getInviteEmailWithCredentialsHTML(interviewTitle, loginUrl, inviteUrl, loginEmail, temporaryPassword, dateWindow);
     const textContent = this.getInviteEmailWithCredentialsText(interviewTitle, loginUrl, inviteUrl, loginEmail, temporaryPassword, dateWindow);
