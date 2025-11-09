@@ -387,18 +387,18 @@ router.delete('/:id/invitations/:invitationId', requireRole(['recruiter']), asyn
       return res.status(400).json({ message: 'Invitation does not belong to this interview' });
     }
 
-    // Check if interview has been started or completed
+    // Check if this specific invitation has been started or completed
     if (invitation.status === 'started' || invitation.status === 'completed') {
       return res.status(400).json({ 
-        message: 'Cannot revoke invitation. Interview has already been started or completed.',
+        message: 'Cannot revoke invitation. This candidate has already started or completed the interview.',
         status: invitation.status
       });
     }
 
-    // Check if interview itself has been started
-    if (interview.status === 'in_progress' || interview.status === 'completed') {
+    // Only block if the interview itself is completed (not in_progress, as other candidates may still have pending invitations)
+    if (interview.status === 'completed') {
       return res.status(400).json({ 
-        message: 'Cannot revoke invitation. Interview is already in progress or completed.',
+        message: 'Cannot revoke invitation. Interview has been completed.',
         interviewStatus: interview.status
       });
     }
