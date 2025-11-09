@@ -1,0 +1,22 @@
+{
+  "name": "hirecorrecto",
+  "version": "1.0.0",
+  "description": "AI-powered interview platform with Gemini Live integration",
+  "main": "index.js",
+  "scripts": {
+    "start:all": "concurrently \"npm run server\" \"npm run client\"",
+    "stop:all": "pkill -f 'node.*server' && pkill -f 'vite'",
+    "restart": "./scripts/restart.sh",
+    "server": "cd server && npm run dev",
+    "client": "cd client && npm run dev",
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install",
+    "build": "cd client && npm run build",
+    "test": "cd server && npm test"
+  },
+  "keywords": ["interview", "ai", "gemini", "recruitment"],
+  "author": "HireCorrecto",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

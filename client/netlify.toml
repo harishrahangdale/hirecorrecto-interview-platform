@@ -1,0 +1,34 @@
+# Netlify deployment configuration for HireCorrecto Frontend
+
+[build]
+  # Build command - installs dependencies and builds the React app
+  command = "npm install && npm run build"
+  # Directory containing the built static files
+  publish = "dist"
+
+# Redirect rules for client-side routing (React Router)
+# All routes should serve index.html to allow React Router to handle routing
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Headers for security and CORS (if needed)
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-XSS-Protection = "1; mode=block"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+# Cache static assets
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# Environment variables should be set in Netlify dashboard:
+# - VITE_API_URL: Your backend API URL (e.g., https://your-backend.onrender.com/api)
+#   This is required for the frontend to connect to the backend when deployed separately
+

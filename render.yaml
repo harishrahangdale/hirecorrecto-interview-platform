@@ -1,0 +1,66 @@
+# Render deployment configuration for HireCorrecto Backend
+# This file can be used to deploy the backend service on Render
+# 
+# To use this file:
+# 1. Push this file to your repository
+# 2. In Render dashboard, create a new "Web Service"
+# 3. Connect your repository
+# 4. Render will automatically detect this render.yaml file
+#
+# Alternatively, you can configure the service manually in the Render dashboard
+
+services:
+  - type: web
+    name: hirecorrecto-backend
+    runtime: node
+    # Root directory for the backend
+    rootDir: server
+    # Build command
+    buildCommand: npm install
+    # Start command
+    startCommand: npm start
+    # Environment variables (set these in Render dashboard or uncomment and set values)
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        # Render automatically sets PORT, but we can specify a default
+        value: 5004
+      # Required: Set these in Render dashboard
+      # - key: MONGODB_URI
+      #   value: your_mongodb_connection_string
+      # - key: CLIENT_URL
+      #   value: https://your-frontend.netlify.app
+      # - key: GEMINI_API_KEY
+      #   value: your_gemini_api_key
+      # - key: GEMINI_MODEL
+      #   value: gemini-2.5-pro
+      # - key: JWT_SECRET
+      #   value: your_jwt_secret
+      # - key: SMTP_HOST
+      #   value: smtp.gmail.com
+      # - key: SMTP_PORT
+      #   value: 587
+      # - key: SMTP_USER
+      #   value: your_email@gmail.com
+      # - key: SMTP_PASS
+      #   value: your_app_password
+      # - key: STORAGE_BACKEND
+      #   value: local
+      #   # Note: For production, consider using cloud storage (S3, Cloudinary)
+      #   # as Render's filesystem is ephemeral
+      # - key: UPLOAD_DIR
+      #   value: ./uploads
+      # - key: JWT_EXPIRES_IN
+      #   value: 7d
+      # - key: USD_TO_INR_RATE
+      #   value: 83.5
+    # Health check endpoint
+    healthCheckPath: /api/health
+    # Auto-deploy from main branch
+    autoDeploy: true
+    # Plan (free tier available)
+    plan: free
+    # Region (choose closest to your users)
+    region: oregon
+

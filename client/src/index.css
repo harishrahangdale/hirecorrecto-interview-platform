@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-primary-600 hover:bg-primary-700 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200;
+  }
+  
+  .btn-secondary {
+    @apply bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium py-2 px-4 rounded-lg transition-colors duration-200;
+  }
+  
+  .input-field {
+    @apply w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent;
+  }
+  
+  .card {
+    @apply bg-white rounded-lg shadow-sm border border-gray-200 p-6;
+  }
+  
+  .rich-text-content {
+    @apply text-gray-700;
+  }
+  
+  .rich-text-content p {
+    @apply mb-2;
+  }
+  
+  .rich-text-content p:last-child {
+    @apply mb-0;
+  }
+  
+  .rich-text-content strong,
+  .rich-text-content b {
+    @apply font-bold text-gray-900;
+  }
+  
+  .rich-text-content em,
+  .rich-text-content i {
+    @apply italic;
+  }
+  
+  .rich-text-content u {
+    @apply underline;
+  }
+  
+  .rich-text-content ul,
+  .rich-text-content ol {
+    @apply my-2 ml-6;
+  }
+  
+  .rich-text-content ul {
+    @apply list-disc;
+  }
+  
+  .rich-text-content ol {
+    @apply list-decimal;
+  }
+  
+  .rich-text-content li {
+    @apply mb-1;
+  }
+  
+  .rich-text-content a {
+    @apply text-indigo-600 underline hover:text-indigo-800;
+  }
+  
+  .rich-text-content h1,
+  .rich-text-content h2,
+  .rich-text-content h3,
+  .rich-text-content h4,
+  .rich-text-content h5,
+  .rich-text-content h6 {
+    @apply font-bold text-gray-900 mt-4 mb-2;
+  }
+  
+  .rich-text-content h1 {
+    @apply text-2xl;
+  }
+  
+  .rich-text-content h2 {
+    @apply text-xl;
+  }
+  
+  .rich-text-content h3 {
+    @apply text-lg;
+  }
+}
