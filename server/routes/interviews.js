@@ -482,7 +482,7 @@ router.get('/:id', async (req, res) => {
 
 // Invite candidate to interview
 router.post('/:id/invite', requireRole(['recruiter']), [
-  body('candidateEmail').isEmail().normalizeEmail(),
+  body('candidateEmail').isEmail(),
   body('firstName').optional().trim(),
   body('lastName').optional().trim()
 ], async (req, res) => {
