@@ -11,8 +11,8 @@ const router = express.Router();
 const storageBackend = process.env.STORAGE_BACKEND || 'local';
 
 let multerStorage;
-if (storageBackend === 's3') {
-  // Use memory storage for S3 (upload to memory, then to S3)
+if (storageBackend === 's3' || storageBackend === 'azure') {
+  // Use memory storage for S3 and Azure (upload to memory, then to cloud storage)
   multerStorage = multer.memoryStorage();
 } else {
   // Use disk storage for local filesystem
@@ -99,8 +99,8 @@ router.post('/:interviewId/:questionId', upload.single('video'), async (req, res
     
     let uploadResult;
     
-    if (storageBackend === 's3') {
-      // Upload to S3 from memory buffer
+    if (storageBackend === 's3' || storageBackend === 'azure') {
+      // Upload to S3 or Azure from memory buffer
       uploadResult = await storageService.uploadFile(
         req.file.buffer,
         interviewId,
@@ -180,8 +180,9 @@ router.get('/:interviewId/:questionId/:filename', async (req, res) => {
     
     const fileInfo = await storageService.getFileInfo(interviewId, questionId, filename, isFullSession);
     
-    // If S3 and file is private, generate signed URL
-    if (storageBackend === 's3' && fileInfo.storage === 's3') {
+    // If S3 or Azure and file is private, generate signed URL
+    if ((storageBackend === 's3' && fileInfo.storage === 's3') || 
+        (storageBackend === 'azure' && fileInfo.storage === 'azure')) {
       try {
         const fileKey = storageService.generateFilePath(interviewId, questionId, filename, isFullSession);
         fileInfo.signedUrl = await storageService.getSignedUrl(fileKey);

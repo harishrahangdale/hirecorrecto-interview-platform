@@ -8,6 +8,8 @@ class StorageService {
     
     if (this.backend === 's3') {
       this.initializeS3();
+    } else if (this.backend === 'azure') {
+      this.initializeAzure();
     } else {
       this.initializeLocal();
     }
@@ -46,6 +48,76 @@ class StorageService {
     console.log(`Storage backend: S3 (bucket: ${this.bucketName})`);
   }
 
+  initializeAzure() {
+    // Lazy load Azure SDK only when Azure is used
+    let AzureStorageBlob;
+    try {
+      AzureStorageBlob = require('@azure/storage-blob');
+    } catch (error) {
+      console.error('@azure/storage-blob not installed. Install it with: npm install @azure/storage-blob');
+      console.warn('Falling back to local storage.');
+      this.backend = 'local';
+      this.initializeLocal();
+      return;
+    }
+    
+    // Get Azure configuration
+    const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+    const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
+    const accountName = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+    const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
+    
+    // Azure requires either connection string OR account name + key
+    if (!connectionString && (!accountName || !accountKey)) {
+      console.warn('Azure storage credentials not set. Falling back to local storage.');
+      console.warn('Provide either AZURE_STORAGE_CONNECTION_STRING or both AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY');
+      this.backend = 'local';
+      this.initializeLocal();
+      return;
+    }
+    
+    if (!containerName) {
+      console.warn('AZURE_STORAGE_CONTAINER_NAME not set. Falling back to local storage.');
+      this.backend = 'local';
+      this.initializeLocal();
+      return;
+    }
+    
+    // Initialize Azure Blob Service Client
+    let blobServiceClient;
+    if (connectionString) {
+      blobServiceClient = AzureStorageBlob.BlobServiceClient.fromConnectionString(connectionString);
+    } else {
+      const sharedKeyCredential = new AzureStorageBlob.StorageSharedKeyCredential(accountName, accountKey);
+      const blobServiceUrl = `https://${accountName}.blob.core.windows.net`;
+      blobServiceClient = new AzureStorageBlob.BlobServiceClient(blobServiceUrl, sharedKeyCredential);
+    }
+    
+    this.blobServiceClient = blobServiceClient;
+    this.containerName = containerName;
+    this.containerClient = blobServiceClient.getContainerClient(containerName);
+    this.cdnUrl = process.env.AZURE_CDN_URL || null; // Optional CDN URL
+    
+    // Ensure container exists (fire-and-forget, will be created on first use if it fails here)
+    this.ensureContainerExists().catch(error => {
+      console.warn('Could not ensure Azure container exists during initialization:', error.message);
+      console.warn('Container will be created automatically on first upload if it does not exist.');
+    });
+    
+    console.log(`Storage backend: Azure Blob Storage (container: ${this.containerName})`);
+  }
+
+  async ensureContainerExists() {
+    try {
+      await this.containerClient.createIfNotExists({
+        access: 'private' // Private by default, use SAS URLs for access
+      });
+    } catch (error) {
+      console.error('Error ensuring Azure container exists:', error);
+      // Don't throw - let it be created on first upload if needed
+    }
+  }
+
   initializeLocal() {
     const uploadDir = process.env.UPLOAD_DIR || './uploads';
     if (!fs.existsSync(uploadDir)) {
@@ -75,6 +147,8 @@ class StorageService {
 
     if (this.backend === 's3') {
       return await this.uploadToS3(fileBuffer, fileKey, originalFilename);
+    } else if (this.backend === 'azure') {
+      return await this.uploadToAzure(fileBuffer, fileKey, originalFilename);
     } else {
       return await this.uploadToLocal(fileBuffer, interviewId, questionId, uniqueFilename, isFullSession);
     }
@@ -119,6 +193,43 @@ class StorageService {
   }
 
   /**
+   * Upload to Azure Blob Storage
+   */
+  async uploadToAzure(fileBuffer, fileKey, originalFilename) {
+    try {
+      const blockBlobClient = this.containerClient.getBlockBlobClient(fileKey);
+      
+      // Upload file to Azure Blob Storage
+      await blockBlobClient.upload(fileBuffer, fileBuffer.length, {
+        blobHTTPHeaders: {
+          blobContentType: 'video/webm' // Adjust based on file type
+        },
+        metadata: {
+          originalFilename: originalFilename,
+          uploadedAt: new Date().toISOString()
+        }
+      });
+      
+      // Generate URL (use CDN if available, otherwise blob URL)
+      const fileUrl = this.cdnUrl 
+        ? `${this.cdnUrl}/${fileKey}`
+        : blockBlobClient.url;
+
+      return {
+        filename: path.basename(fileKey),
+        fileUrl: fileUrl,
+        fileKey: fileKey,
+        size: fileBuffer.length,
+        storage: 'azure',
+        container: this.containerName
+      };
+    } catch (error) {
+      console.error('Azure upload error:', error);
+      throw new Error(`Failed to upload to Azure: ${error.message}`);
+    }
+  }
+
+  /**
    * Upload to local filesystem
    */
   async uploadToLocal(fileBuffer, interviewId, questionId, filename, isFullSession) {
@@ -159,25 +270,44 @@ class StorageService {
   }
 
   /**
-   * Get signed URL for S3 file (for private files)
+   * Get signed URL for S3 or Azure file (for private files)
    */
   async getSignedUrl(fileKey, expiresIn = 3600) {
-    if (this.backend !== 's3') {
-      throw new Error('Signed URLs only available for S3 storage');
-    }
+    if (this.backend === 's3') {
+      try {
+        const params = {
+          Bucket: this.bucketName,
+          Key: fileKey,
+          Expires: expiresIn // URL expires in 1 hour by default
+        };
 
-    try {
-      const params = {
-        Bucket: this.bucketName,
-        Key: fileKey,
-        Expires: expiresIn // URL expires in 1 hour by default
-      };
-
-      const url = await this.s3.getSignedUrlPromise('getObject', params);
-      return url;
-    } catch (error) {
-      console.error('Error generating signed URL:', error);
-      throw new Error(`Failed to generate signed URL: ${error.message}`);
+        const url = await this.s3.getSignedUrlPromise('getObject', params);
+        return url;
+      } catch (error) {
+        console.error('Error generating signed URL:', error);
+        throw new Error(`Failed to generate signed URL: ${error.message}`);
+      }
+    } else if (this.backend === 'azure') {
+      try {
+        const AzureStorageBlob = require('@azure/storage-blob');
+        const blockBlobClient = this.containerClient.getBlockBlobClient(fileKey);
+        
+        // Generate SAS URL (Shared Access Signature)
+        const expiresOn = new Date();
+        expiresOn.setSeconds(expiresOn.getSeconds() + expiresIn);
+        
+        const sasUrl = await blockBlobClient.generateSasUrl({
+          permissions: AzureStorageBlob.BlobSASPermissions.parse('r'), // Read permission
+          expiresOn: expiresOn
+        });
+        
+        return sasUrl;
+      } catch (error) {
+        console.error('Error generating Azure signed URL:', error);
+        throw new Error(`Failed to generate Azure signed URL: ${error.message}`);
+      }
+    } else {
+      throw new Error('Signed URLs only available for S3 or Azure storage');
     }
   }
 
@@ -189,6 +319,8 @@ class StorageService {
 
     if (this.backend === 's3') {
       return await this.deleteFromS3(fileKey);
+    } else if (this.backend === 'azure') {
+      return await this.deleteFromAzure(fileKey);
     } else {
       return await this.deleteFromLocal(interviewId, questionId, filename, isFullSession);
     }
@@ -207,6 +339,23 @@ class StorageService {
     } catch (error) {
       console.error('S3 delete error:', error);
       throw new Error(`Failed to delete from S3: ${error.message}`);
+    }
+  }
+
+  /**
+   * Delete from Azure Blob Storage
+   */
+  async deleteFromAzure(fileKey) {
+    try {
+      const blockBlobClient = this.containerClient.getBlockBlobClient(fileKey);
+      await blockBlobClient.delete();
+      return { success: true, storage: 'azure' };
+    } catch (error) {
+      if (error.statusCode === 404) {
+        throw new Error('File not found');
+      }
+      console.error('Azure delete error:', error);
+      throw new Error(`Failed to delete from Azure: ${error.message}`);
     }
   }
 
@@ -243,6 +392,8 @@ class StorageService {
 
     if (this.backend === 's3') {
       return await this.getS3FileInfo(fileKey);
+    } else if (this.backend === 'azure') {
+      return await this.getAzureFileInfo(fileKey);
     } else {
       return await this.getLocalFileInfo(interviewId, questionId, filename, isFullSession);
     }
@@ -267,6 +418,30 @@ class StorageService {
       };
     } catch (error) {
       if (error.code === 'NotFound') {
+        throw new Error('File not found');
+      }
+      throw new Error(`Failed to get file info: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get Azure file info
+   */
+  async getAzureFileInfo(fileKey) {
+    try {
+      const blockBlobClient = this.containerClient.getBlockBlobClient(fileKey);
+      const properties = await blockBlobClient.getProperties();
+
+      return {
+        filename: path.basename(fileKey),
+        size: properties.contentLength,
+        contentType: properties.contentType,
+        lastModified: properties.lastModified,
+        storage: 'azure',
+        metadata: properties.metadata
+      };
+    } catch (error) {
+      if (error.statusCode === 404) {
         throw new Error('File not found');
       }
       throw new Error(`Failed to get file info: ${error.message}`);
