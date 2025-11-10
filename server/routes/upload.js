@@ -39,7 +39,23 @@ if (storageBackend === 's3' || storageBackend === 'azure') {
       cb(null, uploadPath);
     },
     filename: (req, file, cb) => {
-      const uniqueName = `${uuidv4()}-${Date.now()}${path.extname(file.originalname)}`;
+      // Ensure we have a proper extension - if originalname doesn't have one, use mimetype
+      let extension = path.extname(file.originalname);
+      if (!extension) {
+        // Determine extension from mimetype
+        if (file.mimetype.includes('webm')) {
+          extension = '.webm';
+        } else if (file.mimetype.includes('mp4')) {
+          extension = '.mp4';
+        } else if (file.mimetype.includes('avi')) {
+          extension = '.avi';
+        } else if (file.mimetype.includes('mov')) {
+          extension = '.mov';
+        } else {
+          extension = '.webm'; // Default to webm for video/webm
+        }
+      }
+      const uniqueName = `${uuidv4()}-${Date.now()}${extension}`;
       cb(null, uniqueName);
     }
   });

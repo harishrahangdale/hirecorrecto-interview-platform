@@ -25,7 +25,22 @@ export default function InterviewResults() {
       setInterview(response.data.interview)
     } catch (error) {
       console.error('Error fetching results:', error)
-      toast.error('Failed to load interview results')
+      
+      // Provide more specific error messages
+      if (error.response?.status === 400) {
+        const message = error.response?.data?.message || 'Interview results not available'
+        if (message.includes('not completed')) {
+          toast.error('This interview is still in progress. Results will be available once completed.')
+        } else {
+          toast.error(message)
+        }
+      } else if (error.response?.status === 404) {
+        toast.error('Interview not found')
+      } else if (error.response?.status === 403) {
+        toast.error('Access denied. You do not have permission to view these results.')
+      } else {
+        toast.error('Failed to load interview results. Please try again later.')
+      }
     } finally {
       setLoading(false)
     }
@@ -97,22 +112,37 @@ export default function InterviewResults() {
 
   if (!interview) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-50 via-white to-purple-50">
         <div className="text-center">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">Results Not Found</h2>
-          <button
-            onClick={() => navigate('/')}
-            className="btn-primary"
-          >
-            Return to Dashboard
-          </button>
+          <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md">
+            <div className="bg-amber-100 rounded-full p-4 w-16 h-16 flex items-center justify-center mx-auto mb-4">
+              <Clock className="h-8 w-8 text-amber-600" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">Interview Not Available</h2>
+            <p className="text-gray-600 mb-6">
+              This interview may still be in progress or the results are not yet available.
+            </p>
+            <button
+              onClick={() => navigate('/')}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded-lg transition-colors"
+            >
+              Back to Dashboard
+            </button>
+          </div>
         </div>
       </div>
     )
   }
 
+  const isInProgress = interview.status === 'in_progress'
   const stats = interview.statistics || {}
-  const aggregateScores = interview.aggregateScores || {}
+  const aggregateScores = interview.aggregateScores || {
+    overallScore: 0,
+    averageRelevance: 0,
+    averageTechnicalAccuracy: 0,
+    averageFluency: 0,
+    overallCheatRisk: 0
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50">
@@ -204,6 +234,21 @@ export default function InterviewResults() {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* In Progress Banner */}
+        {isInProgress && (
+          <div className="mb-6 bg-amber-50 border-l-4 border-amber-400 p-4 rounded-lg">
+            <div className="flex items-center">
+              <Clock className="h-5 w-5 text-amber-600 mr-3" />
+              <div>
+                <h3 className="text-sm font-semibold text-amber-800">Interview In Progress</h3>
+                <p className="text-sm text-amber-700 mt-1">
+                  This interview is still ongoing. Results shown below are partial and will be updated when the interview is completed.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Overview Tab */}
         {activeTab === 'overview' && (
           <div className="space-y-6">
@@ -264,8 +309,8 @@ export default function InterviewResults() {
               </div>
             </div>
 
-            {/* AI Hiring Recommendation */}
-            {interview.aiRecommendation && interview.aiRecommendation.fitStatus && (
+            {/* AI Hiring Recommendation - Only show for completed interviews */}
+            {!isInProgress && interview.aiRecommendation && interview.aiRecommendation.fitStatus && (
               <div className="card border-2">
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-xl font-bold text-gray-900 flex items-center space-x-2">
@@ -475,18 +520,18 @@ export default function InterviewResults() {
                 <div className="space-y-3">
                   <div className="flex justify-between">
                     <span className="text-gray-600">Model:</span>
-                    <span className="font-medium text-gray-900">{interview.geminiModel || 'N/A'}</span>
+                    <span className="font-medium text-gray-900">{interview.geminiModel || 'gemini-2.5-pro'}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-600">Input Tokens:</span>
                     <span className="font-medium text-gray-900">
-                      {interview.totalTokenUsage?.input_tokens?.toLocaleString() || 0}
+                      {(interview.totalTokenUsage?.input_tokens || 0).toLocaleString()}
                     </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-600">Output Tokens:</span>
                     <span className="font-medium text-gray-900">
-                      {interview.totalTokenUsage?.output_tokens?.toLocaleString() || 0}
+                      {(interview.totalTokenUsage?.output_tokens || 0).toLocaleString()}
                     </span>
                   </div>
                   <div className="flex justify-between">
@@ -502,16 +547,17 @@ export default function InterviewResults() {
                       {stats.tokenAnalysis?.averageTokensPerQuestion?.toFixed(0) || 0}
                     </span>
                   </div>
-                  {interview.totalCostINR !== undefined && interview.totalCostINR > 0 && (
-                    <div className="pt-3 border-t border-gray-200">
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-600 font-medium">Estimated Cost:</span>
-                        <span className="text-2xl font-bold text-blue-600">
-                          ₹{interview.totalCostINR.toFixed(2)}
-                        </span>
-                      </div>
+                  <div className="pt-3 border-t border-gray-200">
+                    <div className="flex justify-between items-center">
+                      <span className="text-gray-600 font-medium">Estimated Cost:</span>
+                      <span className="text-2xl font-bold text-blue-600">
+                        ₹{(interview.totalCostINR || 0).toFixed(2)}
+                      </span>
                     </div>
-                  )}
+                    <div className="text-xs text-gray-500 mt-1">
+                      (${(interview.totalCost || 0).toFixed(4)} USD)
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

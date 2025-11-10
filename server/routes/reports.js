@@ -1,11 +1,127 @@
 const express = require('express');
 const Interview = require('../models/Interview');
+const Invitation = require('../models/Invitation');
 const { requireRole } = require('../middleware/auth');
 const { convertToINR } = require('../services/gemini');
 
 const router = express.Router();
 
-// Get interview results (recruiter only)
+// Get interview-level summary - all candidates who took this interview (Level 2)
+router.get('/interviews/:id/summary', requireRole(['recruiter']), async (req, res) => {
+  try {
+    const interviewTemplate = await Interview.findById(req.params.id)
+      .populate('recruiterId', 'firstName lastName email');
+
+    if (!interviewTemplate) {
+      return res.status(404).json({ message: 'Interview not found' });
+    }
+
+    // Check if recruiter owns this interview
+    if (interviewTemplate.recruiterId._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Find all invitations for this interview
+    const invitations = await Invitation.find({ interviewId: req.params.id })
+      .populate('candidateId', 'firstName lastName email')
+      .sort({ completedAt: -1, startedAt: -1 });
+
+    // Find all interview attempts (interviews with candidateId/candidateEmail linked to this template)
+    // We'll use invitations to find candidate attempts
+    const candidateAttempts = [];
+    
+    for (const invitation of invitations) {
+      // Find interview attempts for this candidate
+      const attempts = await Interview.find({
+        recruiterId: req.user._id,
+        $or: [
+          { candidateId: invitation.candidateId },
+          { candidateEmail: invitation.candidateEmail }
+        ],
+        status: { $in: ['in_progress', 'completed'] }
+      })
+      .populate('candidateId', 'firstName lastName email')
+      .sort({ completedAt: -1, startedAt: -1 });
+
+      // Filter to find attempts that match this interview template (by title or other criteria)
+      const matchingAttempts = attempts.filter(attempt => 
+        attempt.title === interviewTemplate.title || 
+        attempt._id.toString() === req.params.id
+      );
+
+      matchingAttempts.forEach(attempt => {
+        candidateAttempts.push({
+          interviewId: attempt._id,
+          candidate: attempt.candidateId ? {
+            id: attempt.candidateId._id,
+            name: `${attempt.candidateId.firstName} ${attempt.candidateId.lastName}`,
+            email: attempt.candidateId.email
+          } : {
+            email: attempt.candidateEmail
+          },
+          status: attempt.status,
+          startedAt: attempt.startedAt,
+          completedAt: attempt.completedAt,
+          aggregateScores: attempt.aggregateScores || {},
+          aiRecommendation: attempt.aiRecommendation || {},
+          totalTokenUsage: attempt.totalTokenUsage || { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+          totalCost: attempt.totalCost || 0,
+          totalCostINR: attempt.totalCost ? convertToINR(attempt.totalCost) : 0,
+          questionsAnswered: attempt.questions.filter(q => q.answeredAt).length,
+          totalQuestions: attempt.questions.length
+        });
+      });
+    }
+
+    // Calculate aggregate metrics across all candidates
+    const completedAttempts = candidateAttempts.filter(a => a.status === 'completed');
+    const aggregateMetrics = {
+      totalCandidates: candidateAttempts.length,
+      completedCandidates: completedAttempts.length,
+      inProgressCandidates: candidateAttempts.filter(a => a.status === 'in_progress').length,
+      averageOverallScore: completedAttempts.length > 0
+        ? completedAttempts.reduce((sum, a) => sum + (a.aggregateScores.overallScore || 0), 0) / completedAttempts.length
+        : 0,
+      averageRelevance: completedAttempts.length > 0
+        ? completedAttempts.reduce((sum, a) => sum + (a.aggregateScores.averageRelevance || 0), 0) / completedAttempts.length
+        : 0,
+      averageTechnicalAccuracy: completedAttempts.length > 0
+        ? completedAttempts.reduce((sum, a) => sum + (a.aggregateScores.averageTechnicalAccuracy || 0), 0) / completedAttempts.length
+        : 0,
+      averageFluency: completedAttempts.length > 0
+        ? completedAttempts.reduce((sum, a) => sum + (a.aggregateScores.averageFluency || 0), 0) / completedAttempts.length
+        : 0,
+      averageCheatRisk: completedAttempts.length > 0
+        ? completedAttempts.reduce((sum, a) => sum + (a.aggregateScores.overallCheatRisk || 0), 0) / completedAttempts.length
+        : 0,
+      totalTokenUsage: candidateAttempts.reduce((sum, a) => ({
+        input_tokens: sum.input_tokens + (a.totalTokenUsage.input_tokens || 0),
+        output_tokens: sum.output_tokens + (a.totalTokenUsage.output_tokens || 0),
+        total_tokens: sum.total_tokens + (a.totalTokenUsage.total_tokens || 0)
+      }), { input_tokens: 0, output_tokens: 0, total_tokens: 0 }),
+      totalCost: candidateAttempts.reduce((sum, a) => sum + (a.totalCost || 0), 0),
+      totalCostINR: candidateAttempts.reduce((sum, a) => sum + (a.totalCostINR || 0), 0)
+    };
+
+    res.json({
+      interviewTemplate: {
+        id: interviewTemplate._id,
+        title: interviewTemplate.title,
+        description: interviewTemplate.description,
+        expectedSkills: interviewTemplate.expectedSkills,
+        createdAt: interviewTemplate.createdAt,
+        isPublished: interviewTemplate.isPublished
+      },
+      aggregateMetrics,
+      candidateAttempts
+    });
+  } catch (error) {
+    console.error('Get interview summary error:', error);
+    res.status(500).json({ message: 'Server error fetching interview summary' });
+  }
+});
+
+// Get interview results - detailed results for one candidate attempt (Level 3)
 router.get('/interviews/:id/results', requireRole(['recruiter']), async (req, res) => {
   try {
     const interview = await Interview.findById(req.params.id)
@@ -21,12 +137,54 @@ router.get('/interviews/:id/results', requireRole(['recruiter']), async (req, re
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    if (interview.status !== 'completed') {
-      return res.status(400).json({ message: 'Interview not completed yet' });
+    // Handle both completed and in-progress interviews
+    const isCompleted = interview.status === 'completed';
+    const isInProgress = interview.status === 'in_progress';
+    
+    if (!isCompleted && !isInProgress) {
+      return res.status(400).json({ 
+        message: 'Interview results are only available for in-progress or completed interviews',
+        status: interview.status
+      });
     }
 
-    // Calculate detailed statistics
-    const stats = calculateInterviewStats(interview);
+    // Only calculate scores and stats for completed interviews
+    let aggregateScores = interview.aggregateScores || {};
+    let stats = {};
+    
+    if (isCompleted) {
+      // Ensure aggregate scores are calculated if they don't exist
+      if (!interview.aggregateScores || Object.keys(interview.aggregateScores).length === 0) {
+        interview.calculateAggregateScores();
+        // Recalculate if still empty (might be because no questions have evaluations)
+        if (!interview.aggregateScores || Object.keys(interview.aggregateScores).length === 0) {
+          // Set default empty scores
+          interview.aggregateScores = {
+            averageRelevance: 0,
+            averageTechnicalAccuracy: 0,
+            averageFluency: 0,
+            overallScore: 0,
+            overallCheatRisk: 0
+          };
+        }
+        await interview.save();
+        aggregateScores = interview.aggregateScores;
+      }
+
+      // Calculate detailed statistics
+      stats = calculateInterviewStats(interview);
+    } else {
+      // For in-progress interviews, provide basic stats
+      const answeredQuestions = interview.questions.filter(q => q.answeredAt);
+      stats = {
+        totalQuestions: interview.questions.length,
+        answeredQuestions: answeredQuestions.length,
+        completionRate: interview.questions.length > 0 
+          ? (answeredQuestions.length / interview.questions.length) * 100 
+          : 0,
+        isInProgress: true
+      };
+    }
 
     res.json({
       interview: {
@@ -63,12 +221,13 @@ router.get('/interviews/:id/results', requireRole(['recruiter']), async (req, re
           token_usage: q.token_usage,
           answeredAt: q.answeredAt
         })),
-        aggregateScores: interview.aggregateScores,
-        aiRecommendation: interview.aiRecommendation,
-        totalTokenUsage: interview.totalTokenUsage,
-        totalCost: interview.totalCost,
+        aggregateScores: aggregateScores,
+        aiRecommendation: isCompleted ? (interview.aiRecommendation || {}) : null,
+        totalTokenUsage: interview.totalTokenUsage || { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        totalCost: interview.totalCost || 0,
         totalCostINR: interview.totalCost ? convertToINR(interview.totalCost) : 0,
-        geminiModel: interview.geminiModel,
+        geminiModel: interview.geminiModel || 'gemini-2.5-pro',
+        fullSessionVideoUrl: interview.fullSessionVideoUrl || null,
         statistics: stats
       }
     });
@@ -78,7 +237,66 @@ router.get('/interviews/:id/results', requireRole(['recruiter']), async (req, re
   }
 });
 
-// Get recruiter dashboard metrics
+// Get overall recruiter metrics (Level 1: All interviews aggregate)
+router.get('/overall', requireRole(['recruiter']), async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    // Build date filter
+    let dateFilter = { recruiterId: req.user._id };
+    if (startDate || endDate) {
+      dateFilter.createdAt = {};
+      if (startDate) dateFilter.createdAt.$gte = new Date(startDate);
+      if (endDate) dateFilter.createdAt.$lte = new Date(endDate);
+    }
+
+    const interviews = await Interview.find(dateFilter)
+      .populate('candidateId', 'firstName lastName email');
+
+    const metrics = calculateDashboardMetrics(interviews);
+
+    // Get unique interview templates (group by title or use isPublished to identify templates)
+    const interviewTemplates = await Interview.find({
+      recruiterId: req.user._id,
+      isPublished: true
+    }).select('_id title createdAt');
+
+    res.json({
+      metrics: {
+        ...metrics,
+        totalInterviewTemplates: interviewTemplates.length,
+        totalCandidateAttempts: interviews.filter(i => i.candidateId || i.candidateEmail).length
+      },
+      interviewTemplates: interviewTemplates.map(t => ({
+        id: t._id,
+        title: t.title,
+        createdAt: t.createdAt
+      })),
+      recentInterviews: interviews
+        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+        .slice(0, 10)
+        .map(interview => ({
+          id: interview._id,
+          title: interview.title,
+          status: interview.status,
+          candidate: interview.candidateId ? {
+            name: `${interview.candidateId.firstName} ${interview.candidateId.lastName}`,
+            email: interview.candidateId.email
+          } : {
+            email: interview.candidateEmail
+          },
+          createdAt: interview.createdAt,
+          completedAt: interview.completedAt,
+          aggregateScores: interview.aggregateScores
+        }))
+    });
+  } catch (error) {
+    console.error('Get overall metrics error:', error);
+    res.status(500).json({ message: 'Server error fetching overall metrics' });
+  }
+});
+
+// Get recruiter dashboard metrics (kept for backward compatibility)
 router.get('/dashboard', requireRole(['recruiter']), async (req, res) => {
   try {
     const { startDate, endDate } = req.query;

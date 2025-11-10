@@ -1207,7 +1207,14 @@ IMPORTANT TRANSCRIPTION GUIDELINES:
     try {
       const answeredQuestions = interview.questions.filter(q => q.answeredAt && q.evaluation);
       if (answeredQuestions.length === 0) {
-        throw new Error('No answered questions found');
+        // Return a default recommendation instead of throwing error
+        return {
+          fitStatus: 'incomplete',
+          recommendationSummary: 'No answered questions found. Cannot generate recommendation.',
+          strengths: [],
+          weaknesses: [],
+          token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
+        };
       }
 
       // Build comprehensive interview summary
@@ -1336,6 +1343,446 @@ IMPORTANT:
     }
   }
 
+  /**
+   * Process transcript chunk for fast follow-up question generation
+   * Uses lightweight model (gemini-1.5-flash) for quick response
+   * @param {string} sessionId - Session ID
+   * @param {string} transcriptChunk - Transcript chunk from candidate
+   * @param {string} questionId - Current question ID
+   * @param {string} questionText - Current question text
+   * @returns {Promise<Object>} Analysis result with potential follow-up
+   */
+  async processTranscriptChunk(sessionId, transcriptChunk, questionId, questionText) {
+    if (!this.genAI) {
+      throw new Error('Gemini API not configured');
+    }
+
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error('Invalid session ID');
+    }
+
+    try {
+      // Use lightweight model for fast processing
+      const fastModel = 'gemini-1.5-flash';
+      const model = this.genAI.getGenerativeModel({ 
+        model: fastModel,
+        generationConfig: {
+          temperature: 0.3, // Lower temperature for more focused responses
+          topP: 0.95,
+          topK: 40
+        }
+      });
+
+      const interview = session.interviewData;
+      const previousAnswers = session.answeredQuestions || [];
+
+      // Build context from previous answers
+      let previousContext = '';
+      if (previousAnswers.length > 0) {
+        previousContext = '\nPREVIOUS ANSWERS:\n';
+        previousAnswers.slice(-3).forEach((ans, idx) => {
+          previousContext += `${idx + 1}. Q: ${ans.questionText}\n   A: ${ans.transcript || 'N/A'}\n`;
+        });
+      }
+
+      const prompt = `You are an AI interviewer conducting a technical interview.
+
+INTERVIEW CONTEXT:
+- Job Title: ${interview.title}
+- Experience Level: ${interview.experienceRange}
+- Current Question: "${questionText}"
+${previousContext}
+
+CANDIDATE'S RESPONSE (partial transcript): "${transcriptChunk}"
+
+TASK: Analyze this transcript chunk and determine:
+1. Is the candidate providing a meaningful answer? (not just "um", "uh", etc.)
+2. Should we ask a follow-up question based on what they've said so far?
+3. What would be an appropriate follow-up question?
+
+GUIDELINES:
+- Only suggest follow-ups if the candidate has provided substantial content (not just filler words)
+- Follow-ups should probe deeper or clarify specific points
+- Keep follow-up questions concise (1-2 sentences max)
+- If transcript is too short or unclear, indicate we should wait for more
+
+Return JSON:
+{
+  "has_substantial_content": boolean,
+  "should_ask_followup": boolean,
+  "followup_question": "string or null",
+  "confidence": 0.0-1.0,
+  "reasoning": "brief explanation"
+}`;
+
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
+
+      // Extract token usage
+      const tokenUsage = this.extractTokenUsage(result);
+
+      // Parse response
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON found in transcript chunk response');
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      // Update session token usage
+      session.totalTokens.input += tokenUsage.input_tokens;
+      session.totalTokens.output += tokenUsage.output_tokens;
+      const cost = this.calculateCost(tokenUsage.input_tokens, tokenUsage.output_tokens, fastModel);
+      session.totalCost += cost;
+
+      return {
+        ...parsed,
+        token_usage: tokenUsage,
+        model: fastModel
+      };
+    } catch (error) {
+      console.error('Error processing transcript chunk:', error);
+      throw new Error(`Failed to process transcript chunk: ${error.message}`);
+    }
+  }
+
+  /**
+   * Generate real-time acknowledgment for candidate's response
+   * Phase 2: Quick acknowledgments for natural conversation flow
+   * @param {string} sessionId - Session ID
+   * @param {string} transcriptChunk - Recent transcript chunk
+   * @param {string} questionId - Current question ID
+   * @returns {Promise<Object>} Acknowledgment result
+   */
+  async generateRealTimeAcknowledgment(sessionId, transcriptChunk, questionId) {
+    if (!this.genAI) {
+      return null; // Don't throw, just return null if not configured
+    }
+
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return null;
+    }
+
+    try {
+      // Use very fast model for quick acknowledgments
+      const fastModel = 'gemini-1.5-flash';
+      const model = this.genAI.getGenerativeModel({ 
+        model: fastModel,
+        generationConfig: {
+          temperature: 0.5, // Slightly higher for more natural responses
+          topP: 0.95,
+          topK: 40,
+          maxOutputTokens: 50 // Keep acknowledgments short
+        }
+      });
+
+      const prompt = `You are an AI interviewer. The candidate just said: "${transcriptChunk}"
+
+Generate a brief, natural acknowledgment (1-5 words max). Examples:
+- "I see"
+- "Interesting"
+- "Go on"
+- "That makes sense"
+- "Tell me more"
+
+Only respond if the candidate has provided substantial content (not just "um", "uh"). If transcript is too short or unclear, return null.
+
+Return JSON:
+{
+  "should_acknowledge": boolean,
+  "acknowledgment": "string or null",
+  "confidence": 0.0-1.0
+}`;
+
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text();
+
+      // Extract token usage
+      const tokenUsage = this.extractTokenUsage(result);
+
+      // Parse response
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        return null;
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      // Update session token usage
+      session.totalTokens.input += tokenUsage.input_tokens;
+      session.totalTokens.output += tokenUsage.output_tokens;
+      const cost = this.calculateCost(tokenUsage.input_tokens, tokenUsage.output_tokens, fastModel);
+      session.totalCost += cost;
+
+      return {
+        ...parsed,
+        token_usage: tokenUsage,
+        model: fastModel
+      };
+    } catch (error) {
+      console.error('Error generating real-time acknowledgment:', error);
+      return null; // Don't throw, just return null
+    }
+  }
+
+  /**
+   * Detect if candidate is asking a question (for interview integrity)
+   * Uses pattern-based detection first, then Gemini for accuracy
+   * @param {string} transcript - Candidate's transcript
+   * @param {string} currentQuestionText - Current interview question
+   * @returns {Promise<Object>} Intent detection result
+   */
+  async detectQuestionIntent(transcript, currentQuestionText) {
+    if (!this.genAI) {
+      throw new Error('Gemini API not configured');
+    }
+
+    // Pattern-based detection (fast, first pass)
+    const QUESTION_PATTERNS = {
+      directQuestions: [
+        /^(what|how|why|when|where|can you|could you|would you|tell me|explain)/i,
+        /^(what is|how do|why does|when should|where can)/i,
+        /^(can you tell|could you explain|would you help)/i
+      ],
+      answerRequests: [
+        /(give me|provide|show me|tell me) (the )?(answer|solution|hint|clue)/i,
+        /(what is|what's) (the )?(answer|solution|correct|right)/i,
+        /(help me|assist me) (with|to|in)/i,
+        /(can|could|would) (you )?(give|provide|tell|show|explain)/i
+      ],
+      roleReversal: [
+        /(you should|you need to|you can|you could)/i,
+        /(what would you do|how would you|your approach)/i,
+        /(your answer|your solution|your opinion)/i
+      ],
+      revealingClarification: [
+        /(is it|is this|does it|should it|must it) (the )?(answer|solution|correct|right|way)/i,
+        /(is the answer|is the solution|does this mean)/i,
+        /(confirm|verify|check) (if|that|whether) (it|this|the)/i
+      ]
+    };
+
+    const isQuestion = QUESTION_PATTERNS.directQuestions.some(pattern => pattern.test(transcript));
+    const isAnswerRequest = QUESTION_PATTERNS.answerRequests.some(pattern => pattern.test(transcript));
+    const isRoleReversal = QUESTION_PATTERNS.roleReversal.some(pattern => pattern.test(transcript));
+    const isRevealingClarification = QUESTION_PATTERNS.revealingClarification.some(pattern => pattern.test(transcript));
+    const patternRequiresDeflection = isQuestion || isAnswerRequest || isRoleReversal || isRevealingClarification;
+
+    // If pattern-based detection suggests deflection, use Gemini for confirmation and better response
+    if (patternRequiresDeflection || transcript.length > 20) {
+      try {
+        // Use fast model for quick response
+        const fastModel = 'gemini-1.5-flash';
+        const model = this.genAI.getGenerativeModel({ 
+          model: fastModel,
+          generationConfig: {
+            temperature: 0.2, // Low temperature for accurate classification
+            topP: 0.95,
+            topK: 40
+          }
+        });
+
+        const prompt = `You are an AI interviewer. A candidate just said: "${transcript}"
+
+Current interview question: "${currentQuestionText}"
+
+Determine:
+1. Is the candidate answering the question? (normal)
+2. Is the candidate asking YOU a question? (deflect)
+3. Is the candidate requesting hints/answers? (deflect)
+4. Is the candidate trying to reverse roles? (deflect)
+5. Is the candidate asking for legitimate clarification? (can help)
+
+Rules:
+- Legitimate clarification: Questions about wording, scope, format, constraints
+- NOT legitimate: Questions that would reveal the answer or confirm approaches
+- If transcript is clearly an answer, classify as "answering"
+
+Return JSON:
+{
+  "intent": "answering" | "asking_question" | "requesting_answer" | "role_reversal" | "legitimate_clarification",
+  "confidence": 0.0-1.0,
+  "requires_deflection": boolean,
+  "can_clarify": boolean,
+  "suggested_bot_response": "Professional, polite deflection or clarification (1-2 sentences max)"
+}`;
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          
+          // Validate intent
+          const validIntents = ['answering', 'asking_question', 'requesting_answer', 'role_reversal', 'legitimate_clarification'];
+          if (!validIntents.includes(parsed.intent)) {
+            parsed.intent = 'answering'; // Default to safe option
+          }
+
+          return {
+            ...parsed,
+            detection_method: 'gemini',
+            pattern_detected: patternRequiresDeflection
+          };
+        }
+      } catch (error) {
+        console.error('Error in Gemini question intent detection:', error);
+        // Fallback to pattern-based
+      }
+    }
+
+    // Pattern-based fallback or if no deflection needed
+    let intent = 'answering';
+    let requiresDeflection = false;
+    let canClarify = false;
+    let suggestedBotResponse = '';
+
+    if (isAnswerRequest) {
+      intent = 'requesting_answer';
+      requiresDeflection = true;
+      suggestedBotResponse = "I can't provide the answer, but I'd love to hear your approach. What would you do?";
+    } else if (isRoleReversal) {
+      intent = 'role_reversal';
+      requiresDeflection = true;
+      suggestedBotResponse = "I appreciate the question, but I'm here to evaluate your skills. Could you share your own approach?";
+    } else if (isRevealingClarification) {
+      intent = 'requesting_answer';
+      requiresDeflection = true;
+      suggestedBotResponse = "I can't confirm or deny specific approaches. What's your solution?";
+    } else if (isQuestion) {
+      intent = 'asking_question';
+      requiresDeflection = true;
+      suggestedBotResponse = "I appreciate your question, but I'm here to assess your knowledge. Could you share your thoughts on the question I asked?";
+    }
+
+    return {
+      intent,
+      confidence: patternRequiresDeflection ? 0.7 : 0.9,
+      requires_deflection: requiresDeflection,
+      can_clarify: canClarify,
+      suggested_bot_response: suggestedBotResponse || '',
+      detection_method: 'pattern',
+      pattern_detected: patternRequiresDeflection
+    };
+  }
+
+  /**
+   * Detect candidate response intent (thinking/skip/answering)
+   * Used for silence handling
+   * @param {string} transcript - Candidate's transcript
+   * @returns {Promise<Object>} Response intent result
+   */
+  async detectResponseIntent(transcript) {
+    if (!this.genAI) {
+      throw new Error('Gemini API not configured');
+    }
+
+    // Quick pattern-based check first
+    const lowerTranscript = transcript.toLowerCase().trim();
+    
+    // Thinking indicators
+    const thinkingPatterns = [
+      /^(yes|yeah|yep|sure|okay|ok)\b/i,
+      /(thinking|moment|time|wait|give me)/i,
+      /(need|want|let me) (more )?(time|moment)/i
+    ];
+
+    // Skip indicators
+    const skipPatterns = [
+      /^(no|nope|nah)\b/i,
+      /(don't know|dunno|not sure|unsure)/i,
+      /(skip|next|move on|pass)/i,
+      /(can't|cannot) (answer|know|think)/i
+    ];
+
+    const isThinking = thinkingPatterns.some(pattern => pattern.test(lowerTranscript));
+    const isSkip = skipPatterns.some(pattern => pattern.test(lowerTranscript));
+
+    // If clear pattern match, return quickly
+    if (isThinking && !isSkip) {
+      return {
+        intent: 'thinking',
+        confidence: 0.85,
+        detection_method: 'pattern'
+      };
+    }
+
+    if (isSkip) {
+      return {
+        intent: 'skip',
+        confidence: 0.85,
+        detection_method: 'pattern'
+      };
+    }
+
+    // If transcript is substantial (likely an answer), use Gemini for confirmation
+    if (transcript.length > 30) {
+      try {
+        const fastModel = 'gemini-1.5-flash';
+        const model = this.genAI.getGenerativeModel({ 
+          model: fastModel,
+          generationConfig: {
+            temperature: 0.2,
+            topP: 0.95,
+            topK: 40
+          }
+        });
+
+        const prompt = `Analyze this candidate response and determine intent:
+
+Transcript: "${transcript}"
+
+Determine if the candidate is:
+1. Still thinking (wants more time) - short responses like "yes", "thinking", "give me a moment"
+2. Ready to skip (doesn't know, wants to move on) - responses like "no", "I don't know", "skip"
+3. Starting to answer (has begun their response) - substantial content, technical terms, explanation
+4. Asking for clarification - questions about the question itself
+
+Return JSON:
+{
+  "intent": "thinking" | "skip" | "answering" | "clarification",
+  "confidence": 0.0-1.0,
+  "suggested_bot_response": "string (only if intent is thinking or skip)"
+}`;
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          
+          // Validate intent
+          const validIntents = ['thinking', 'skip', 'answering', 'clarification'];
+          if (!validIntents.includes(parsed.intent)) {
+            parsed.intent = 'answering'; // Default to safe option
+          }
+
+          return {
+            ...parsed,
+            detection_method: 'gemini'
+          };
+        }
+      } catch (error) {
+        console.error('Error in Gemini response intent detection:', error);
+      }
+    }
+
+    // Default: assume answering if substantial content
+    return {
+      intent: transcript.length > 20 ? 'answering' : 'thinking',
+      confidence: 0.7,
+      detection_method: 'heuristic'
+    };
+  }
+
   endSession(sessionId) {
     const session = this.sessions.get(sessionId);
     if (session) {
@@ -1386,6 +1833,22 @@ const generateOverallRecommendation = (interview) => {
   return geminiService.generateOverallRecommendation(interview);
 };
 
+const processTranscriptChunk = (sessionId, transcriptChunk, questionId, questionText) => {
+  return geminiService.processTranscriptChunk(sessionId, transcriptChunk, questionId, questionText);
+};
+
+const detectQuestionIntent = (transcript, currentQuestionText) => {
+  return geminiService.detectQuestionIntent(transcript, currentQuestionText);
+};
+
+const detectResponseIntent = (transcript) => {
+  return geminiService.detectResponseIntent(transcript);
+};
+
+const generateRealTimeAcknowledgment = (sessionId, transcriptChunk, questionId) => {
+  return geminiService.generateRealTimeAcknowledgment(sessionId, transcriptChunk, questionId);
+};
+
 module.exports = {
   initializeGemini,
   generateFirstQuestion,
@@ -1395,5 +1858,9 @@ module.exports = {
   calculateCost,
   convertToINR,
   generateOverallRecommendation,
+  processTranscriptChunk,
+  detectQuestionIntent,
+  detectResponseIntent,
+  generateRealTimeAcknowledgment,
   geminiService
 };

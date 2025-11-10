@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { interviewAPI, reportsAPI } from '../services/api'
 import { 
@@ -13,6 +13,7 @@ import LoadingSpinner from '../components/LoadingSpinner'
 
 export default function RecruiterDashboard() {
   const { user, logout } = useAuth()
+  const navigate = useNavigate()
   const [interviews, setInterviews] = useState([])
   const [metrics, setMetrics] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -148,6 +149,13 @@ export default function RecruiterDashboard() {
               </div>
             </div>
             <div className="flex items-center space-x-4">
+              <button
+                onClick={() => navigate('/reports/overall')}
+                className="bg-white/20 hover:bg-white/30 backdrop-blur-sm text-white px-4 py-2 rounded-lg transition-all text-sm font-medium flex items-center space-x-2"
+              >
+                <BarChart3 className="h-4 w-4" />
+                <span>Overall Metrics</span>
+              </button>
               <div className="bg-white/20 backdrop-blur-sm px-4 py-2 rounded-lg">
                 <span className="text-white text-sm font-medium">Recruiter Dashboard</span>
               </div>

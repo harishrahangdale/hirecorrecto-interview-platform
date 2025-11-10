@@ -219,12 +219,12 @@ router.get('/', async (req, res) => {
     if (req.user.role === 'recruiter') {
       query.recruiterId = req.user._id;
     } else if (req.user.role === 'candidate') {
-      // For candidates, only show published interviews
-      query.isPublished = true;
+      // For candidates, show:
+      // 1. Their own interview attempts (isPublished=false, has candidateId/candidateEmail)
+      // 2. Interview templates they're invited to (isPublished=true, via invitations)
       
-      // For candidates, check both direct assignment and invitations
       try {
-        // First, find all invitations for this candidate
+        // First, find all invitations for this candidate to get template IDs
         const invitations = await Invitation.find({
           $or: [
             { candidateId: req.user._id },
@@ -233,29 +233,48 @@ router.get('/', async (req, res) => {
           status: { $in: ['pending', 'accepted', 'started', 'completed'] }
         }).select('interviewId');
         
-        // Get interview IDs from invitations
         const interviewIdsFromInvitations = invitations.map(inv => inv.interviewId);
         
-        // Build query to include both direct assignments and invitations
-        if (interviewIdsFromInvitations.length > 0) {
+        // Build query: candidate attempts OR invited templates
+        query.$or = [
+          // Candidate-specific attempts (not templates)
+          {
+            $or: [
+              { candidateId: req.user._id },
+              { candidateEmail: req.user.email.toLowerCase() }
+            ],
+            isPublished: false
+          },
+          // Templates they're invited to
+          ...(interviewIdsFromInvitations.length > 0 ? [{
+            _id: { $in: interviewIdsFromInvitations },
+            isPublished: true
+          }] : [])
+        ];
+        
+        // If no invitations and no attempts, return empty
+        if (interviewIdsFromInvitations.length === 0) {
           query.$or = [
-            { candidateId: req.user._id },
-            { candidateEmail: req.user.email.toLowerCase() },
-            { _id: { $in: interviewIdsFromInvitations } }
-          ];
-        } else {
-          // If no invitations, just check direct assignment
-          query.$or = [
-            { candidateId: req.user._id },
-            { candidateEmail: req.user.email.toLowerCase() }
+            {
+              $or: [
+                { candidateId: req.user._id },
+                { candidateEmail: req.user.email.toLowerCase() }
+              ],
+              isPublished: false
+            }
           ];
         }
       } catch (invitationError) {
-        // If Invitation model has issues, fall back to direct assignment only
-        console.warn('Error fetching invitations, using direct assignment only:', invitationError.message);
+        // Fallback: just get candidate attempts
+        console.warn('Error fetching invitations, using candidate attempts only:', invitationError.message);
         query.$or = [
-          { candidateId: req.user._id },
-          { candidateEmail: req.user.email.toLowerCase() }
+          {
+            $or: [
+              { candidateId: req.user._id },
+              { candidateEmail: req.user.email.toLowerCase() }
+            ],
+            isPublished: false
+          }
         ];
       }
     }
@@ -646,9 +665,9 @@ router.post('/:id/start', requireRole(['candidate']), async (req, res) => {
 
     // Check if candidate is authorized (check both direct assignment and invitations)
     let isAuthorized = (interview.candidateId && interview.candidateId.toString() === req.user._id.toString()) ||
-                        interview.candidateEmail === req.user.email.toLowerCase();
+                        (interview.candidateEmail && interview.candidateEmail.toLowerCase() === req.user.email.toLowerCase());
 
-    // Also check if candidate has an invitation for this interview
+    // Also check if candidate has an invitation for this interview (this is the primary way for published interviews)
     let invitation = null;
     if (!isAuthorized) {
       try {
@@ -658,7 +677,7 @@ router.post('/:id/start', requireRole(['candidate']), async (req, res) => {
             { candidateId: req.user._id },
             { candidateEmail: req.user.email.toLowerCase() }
           ],
-          status: { $in: ['pending', 'accepted'] },
+          status: { $in: ['pending', 'accepted', 'started'] }, // Allow started status for resume
           expiresAt: { $gt: new Date() }
         });
         if (invitation) {
@@ -670,11 +689,13 @@ router.post('/:id/start', requireRole(['candidate']), async (req, res) => {
     }
 
     if (!isAuthorized) {
-      return res.status(403).json({ message: 'Access denied' });
+      return res.status(403).json({ message: 'Access denied. You are not authorized to start this interview.' });
     }
 
-    // Check if interview can be started (status should be 'invited' or have a valid invitation)
-    const canStart = interview.status === 'invited' || (invitation && invitation.status === 'pending' || invitation.status === 'accepted');
+    // Check if interview can be started (status should be 'invited', 'in_progress' for resume, or have a valid invitation)
+    const canStart = interview.status === 'invited' || 
+                     interview.status === 'in_progress' || // Allow resume
+                     (invitation && (invitation.status === 'pending' || invitation.status === 'accepted' || invitation.status === 'started'));
     if (!canStart) {
       return res.status(400).json({ message: 'Interview cannot be started' });
     }
@@ -692,10 +713,68 @@ router.post('/:id/start', requireRole(['candidate']), async (req, res) => {
       await invitation.save();
     }
 
-    // Update interview status
-    interview.status = 'in_progress';
-    interview.startedAt = new Date();
-    await interview.save();
+    // IMPORTANT: Don't modify the interview template status
+    // The template should remain as 'invited' or 'draft' so other candidates can also take it
+    // Instead, create a candidate-specific interview instance for each candidate
+    
+    // Check if this candidate already has an interview attempt for this template
+    // Find by matching template (title + recruiterId) and candidate
+    let candidateInterview = await Interview.findOne({
+      recruiterId: interview.recruiterId,
+      title: interview.title, // Match the template title
+      $or: [
+        { candidateId: req.user._id },
+        { candidateEmail: req.user.email.toLowerCase() }
+      ],
+      isPublished: false // Candidate attempts are not published templates
+    });
+
+    // If no candidate-specific attempt exists, create one by cloning the template
+    if (!candidateInterview) {
+      // Create a new interview instance for this candidate
+      candidateInterview = new Interview({
+        title: interview.title,
+        description: interview.description,
+        expectedSkills: interview.expectedSkills,
+        experienceRange: interview.experienceRange,
+        dateWindow: interview.dateWindow,
+        passPercentage: interview.passPercentage,
+        duration: interview.duration,
+        maxQuestions: interview.maxQuestions,
+        mandatoryQuestions: interview.mandatoryQuestions,
+        optionalQuestions: interview.optionalQuestions,
+        mandatoryWeightage: interview.mandatoryWeightage,
+        optionalWeightage: interview.optionalWeightage,
+        recruiterId: interview.recruiterId,
+        candidateId: req.user._id,
+        candidateEmail: req.user.email.toLowerCase(),
+        status: 'in_progress',
+        isPublished: false, // Candidate attempts are not published templates
+        startedAt: new Date(),
+        questions: [], // Start with empty questions
+        geminiModel: interview.geminiModel || process.env.GEMINI_MODEL || 'gemini-2.5-pro',
+        totalTokenUsage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        totalCost: 0
+      });
+      await candidateInterview.save();
+    } else {
+      // Resume existing attempt
+      if (candidateInterview.status === 'in_progress') {
+        // Already in progress, just return it
+      } else if (candidateInterview.status === 'completed') {
+        return res.status(400).json({ message: 'This interview has already been completed' });
+      } else {
+        // Resume from invited or other status
+        candidateInterview.status = 'in_progress';
+        if (!candidateInterview.startedAt) {
+          candidateInterview.startedAt = new Date();
+        }
+        await candidateInterview.save();
+      }
+    }
+
+    // Keep the original template unchanged - don't modify its status
+    // The template remains available for other candidates
 
     // Note: First question will be generated via Socket.IO when Gemini session is initialized
     // This ensures the question is generated in real-time with proper context
@@ -703,13 +782,13 @@ router.post('/:id/start', requireRole(['candidate']), async (req, res) => {
     res.json({
       message: 'Interview started successfully',
       interview: {
-        id: interview._id,
-        title: interview.title,
-        questions: interview.questions, // Will be empty initially, populated dynamically
-        status: interview.status,
-        startedAt: interview.startedAt,
-        maxQuestions: interview.maxQuestions,
-        duration: interview.duration
+        id: candidateInterview._id, // Return the candidate-specific interview ID
+        title: candidateInterview.title,
+        questions: candidateInterview.questions, // Will be empty initially, populated dynamically
+        status: candidateInterview.status,
+        startedAt: candidateInterview.startedAt,
+        maxQuestions: candidateInterview.maxQuestions,
+        duration: candidateInterview.duration
       }
     });
   } catch (error) {
@@ -1181,21 +1260,69 @@ router.post('/:id/complete', requireRole(['candidate']), async (req, res) => {
       return res.status(404).json({ message: 'Interview not found' });
     }
 
-    // Check if candidate is authorized
-    const isAuthorized = (interview.candidateId && interview.candidateId.toString() === req.user._id.toString()) ||
-                        interview.candidateEmail === req.user.email;
+    // Check if candidate is authorized (check both direct assignment and invitations)
+    let isAuthorized = (interview.candidateId && interview.candidateId.toString() === req.user._id.toString()) ||
+                        (interview.candidateEmail && interview.candidateEmail.toLowerCase() === req.user.email.toLowerCase());
+
+    // Also check if candidate has an invitation for this interview (primary way for published interviews)
+    if (!isAuthorized) {
+      try {
+        const invitation = await Invitation.findOne({
+          interviewId: interview._id,
+          $or: [
+            { candidateId: req.user._id },
+            { candidateEmail: req.user.email.toLowerCase() }
+          ],
+          status: { $in: ['pending', 'accepted', 'started', 'completed'] }
+        });
+        if (invitation) {
+          isAuthorized = true;
+        }
+      } catch (invitationError) {
+        console.warn('Error checking invitation:', invitationError.message);
+      }
+    }
 
     if (!isAuthorized) {
-      return res.status(403).json({ message: 'Access denied' });
+      return res.status(403).json({ message: 'Access denied. You are not authorized to complete this interview.' });
+    }
+
+    // Make sure this is a candidate-specific interview attempt, not the template
+    if (!interview.candidateId && !interview.candidateEmail) {
+      return res.status(400).json({ message: 'Cannot complete interview template. Please complete your interview attempt.' });
     }
 
     if (interview.status !== 'in_progress') {
       return res.status(400).json({ message: 'Interview is not in progress' });
     }
 
-    // Update interview status
+    // Update the candidate-specific interview attempt (not the template)
     interview.status = 'completed';
     interview.completedAt = new Date();
+    
+    // Update invitation status if it exists
+    // Find the template to get its ID for the invitation lookup
+    const templateInterview = await Interview.findOne({
+      recruiterId: interview.recruiterId,
+      title: interview.title,
+      isPublished: true // The template should be published
+    });
+
+    if (templateInterview) {
+      const invitation = await Invitation.findOne({
+        interviewId: templateInterview._id,
+        $or: [
+          { candidateId: interview.candidateId },
+          { candidateEmail: interview.candidateEmail }
+        ]
+      });
+
+      if (invitation && invitation.status !== 'completed') {
+        invitation.status = 'completed';
+        invitation.completedAt = new Date();
+        await invitation.save();
+      }
+    }
     
     // Save full session video URL if provided
     if (req.body.fullSessionVideoUrl) {
@@ -1206,31 +1333,52 @@ router.post('/:id/complete', requireRole(['candidate']), async (req, res) => {
       interview.calculateAggregateScores();
       interview.calculateTokenUsage();
       
-      // Generate overall AI recommendation
-      try {
-        const recommendation = await generateOverallRecommendation(interview);
+      // Generate overall AI recommendation (only if there are answered questions)
+      const answeredQuestions = interview.questions.filter(q => q.answeredAt && q.evaluation);
+      if (answeredQuestions.length > 0) {
+        try {
+          const recommendation = await generateOverallRecommendation(interview);
+          interview.aiRecommendation = {
+            fitStatus: recommendation.fitStatus,
+            recommendationSummary: recommendation.recommendationSummary,
+            strengths: recommendation.strengths || [],
+            weaknesses: recommendation.weaknesses || [],
+            generatedAt: new Date()
+          };
+          
+          // Update token usage and cost for recommendation generation
+          const recInputTokens = recommendation.token_usage?.input_tokens || 0;
+          const recOutputTokens = recommendation.token_usage?.output_tokens || 0;
+          interview.totalTokenUsage.input_tokens += recInputTokens;
+          interview.totalTokenUsage.output_tokens += recOutputTokens;
+          interview.totalTokenUsage.total_tokens = interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
+          
+          if (interview.geminiModel) {
+            const recCost = calculateCost(recInputTokens, recOutputTokens, interview.geminiModel);
+            interview.totalCost += recCost;
+          }
+        } catch (error) {
+          console.error('Error generating overall recommendation:', error);
+          // Don't fail interview completion if recommendation generation fails
+          // Set a default recommendation instead
+          interview.aiRecommendation = {
+            fitStatus: 'incomplete',
+            recommendationSummary: 'Interview completed but no recommendations available. Not enough answered questions for analysis.',
+            strengths: [],
+            weaknesses: [],
+            generatedAt: new Date()
+          };
+        }
+      } else {
+        // No answered questions - set default recommendation
+        console.log('No answered questions found, skipping recommendation generation');
         interview.aiRecommendation = {
-          fitStatus: recommendation.fitStatus,
-          recommendationSummary: recommendation.recommendationSummary,
-          strengths: recommendation.strengths || [],
-          weaknesses: recommendation.weaknesses || [],
+          fitStatus: 'incomplete',
+          recommendationSummary: 'Interview completed but no questions were answered. Please complete the interview to receive a recommendation.',
+          strengths: [],
+          weaknesses: [],
           generatedAt: new Date()
         };
-        
-        // Update token usage and cost for recommendation generation
-        const recInputTokens = recommendation.token_usage?.input_tokens || 0;
-        const recOutputTokens = recommendation.token_usage?.output_tokens || 0;
-        interview.totalTokenUsage.input_tokens += recInputTokens;
-        interview.totalTokenUsage.output_tokens += recOutputTokens;
-        interview.totalTokenUsage.total_tokens = interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
-        
-        if (interview.geminiModel) {
-          const recCost = calculateCost(recInputTokens, recOutputTokens, interview.geminiModel);
-          interview.totalCost += recCost;
-        }
-      } catch (error) {
-        console.error('Error generating overall recommendation:', error);
-        // Don't fail the interview completion if recommendation generation fails
       }
       
       // Ensure total tokens is calculated

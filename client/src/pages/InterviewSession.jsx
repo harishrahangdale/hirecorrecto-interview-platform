@@ -29,6 +29,20 @@ export default function InterviewSession() {
   const [showEndConfirm, setShowEndConfirm] = useState(false)
   const [canStartAnswer, setCanStartAnswer] = useState(false) // New: controls when Start Answer button is shown
   
+  // Phase 1: Real-time conversation state
+  const [lastSpeechTime, setLastSpeechTime] = useState(null)
+  const [silenceMonitorInterval, setSilenceMonitorInterval] = useState(null)
+  const [botIntervention, setBotIntervention] = useState(null)
+  const [botDeflection, setBotDeflection] = useState(null)
+  const [botAcknowledgment, setBotAcknowledgment] = useState(null)
+  const [followupQuestion, setFollowupQuestion] = useState(null)
+  
+  // Phase 2: Bi-directional conversation state
+  const [candidateSpeaking, setCandidateSpeaking] = useState(false)
+  const [conversationState, setConversationState] = useState('idle') // 'idle' | 'bot_speaking' | 'candidate_speaking' | 'listening'
+  const [audioEnergy, setAudioEnergy] = useState(0) // For VAD visualization
+  const [turnQueue, setTurnQueue] = useState([]) // Queue for turn management
+  
   // Video+Audio recording for submission
   const [videoChunks, setVideoChunks] = useState([])
   const [mediaRecorder, setMediaRecorder] = useState(null)
@@ -45,6 +59,15 @@ export default function InterviewSession() {
   const audioContextRef = useRef(null)
   const audioWorkletRef = useRef(null)
   const silenceStartTimeRef = useRef(null)
+  // Phase 2: VAD and audio streaming refs
+  const analyserNodeRef = useRef(null)
+  const audioStreamRef = useRef(null)
+  const vadIntervalRef = useRef(null)
+  const audioChunkIntervalRef = useRef(null)
+  const vadThresholdRef = useRef(0.01) // Adaptive threshold for VAD
+  const lastVADStateRef = useRef(false) // Track previous VAD state
+  const silenceDurationRef = useRef(0) // Track silence duration for turn-taking
+  const candidateSpeakingStartTimeRef = useRef(null)
   const isAnsweringRef = useRef(false)
   const mediaRecorderRef = useRef(null) // Use ref for immediate access
   const processedResultsRef = useRef(new Set()) // Track processed result indices to prevent duplicates
@@ -59,6 +82,7 @@ export default function InterviewSession() {
   const sessionInitializedRef = useRef(false) // Prevent duplicate session initialization
   const currentQuestionIdRef = useRef(null) // Store current question ID to prevent null reference issues
   const isHandlingResponseRef = useRef(false) // Prevent duplicate handling of gemini-response events
+  const candidateInterviewIdRef = useRef(null) // Store candidate-specific interview ID (different from template ID)
   
   // Continuous recording and timestamp tracking for cheating detection
   const fullSessionRecorderRef = useRef(null) // Continuous recording for entire session
@@ -130,6 +154,9 @@ export default function InterviewSession() {
     if (audioContextRef.current) {
       audioContextRef.current.close()
     }
+    
+    // Phase 2: Stop VAD
+    stopVAD()
     // Stop any ongoing speech
     window.speechSynthesis.cancel()
     speakingRef.current = false
@@ -170,6 +197,82 @@ export default function InterviewSession() {
     }
   }, [sessionStatus, interviewStartTime, interview?.duration])
 
+  // Phase 1: Silence monitoring with debouncing to prevent duplicate emissions
+  // IMPORTANT: Only monitor silence when candidate is actively answering (not after they've finished)
+  useEffect(() => {
+    if (sessionStatus === 'in_progress' && currentQuestion && socket && geminiSession && canStartAnswer && lastSpeechTime && !candidateSpeaking && isAnsweringRef.current) {
+      let hasIntervened = false
+      let lastCheckedDuration = 0
+      let lastEmittedLevel = null // Track last emitted intervention level
+      let interventionEmitted = false // Flag to prevent duplicate emissions
+      
+      const monitorSilence = setInterval(() => {
+        // Don't monitor if:
+        // - Candidate is currently speaking
+        // - No question or lastSpeechTime
+        // - Not actively answering (isAnsweringRef is false - means they've finished)
+        if (!lastSpeechTime || !currentQuestion || candidateSpeaking || !isAnsweringRef.current) {
+          return
+        }
+        
+        const silenceDuration = Date.now() - lastSpeechTime
+        
+        // Only emit if we've crossed a threshold AND haven't already emitted for this level
+        // This prevents duplicate emissions that cause multiple question jumps
+        if (silenceDuration >= 7000 && silenceDuration < 15000 && !hasIntervened && lastCheckedDuration < 7000 && lastEmittedLevel !== 'thinking_check') {
+          // First intervention: thinking check
+          socket.emit('silence-detected', {
+            sessionId: geminiSession,
+            questionId: currentQuestion.id,
+            silenceDuration: silenceDuration,
+            interventionLevel: 'thinking_check'
+          })
+          hasIntervened = true
+          lastEmittedLevel = 'thinking_check'
+          interventionEmitted = true
+        } else if (silenceDuration >= 15000 && silenceDuration < 30000 && lastCheckedDuration < 15000 && lastEmittedLevel !== 'suggest_move_on') {
+          // Second intervention: suggest move on
+          socket.emit('silence-detected', {
+            sessionId: geminiSession,
+            questionId: currentQuestion.id,
+            silenceDuration: silenceDuration,
+            interventionLevel: 'suggest_move_on'
+          })
+          lastEmittedLevel = 'suggest_move_on'
+          interventionEmitted = true
+        } else if (silenceDuration >= 30000 && lastCheckedDuration < 30000 && lastEmittedLevel !== 'force_move') {
+          // Force move to next question - only emit once
+          socket.emit('silence-detected', {
+            sessionId: geminiSession,
+            questionId: currentQuestion.id,
+            silenceDuration: silenceDuration,
+            interventionLevel: 'force_move'
+          })
+          lastEmittedLevel = 'force_move'
+          interventionEmitted = true
+          // Clear the interval after force move to prevent further emissions
+          clearInterval(monitorSilence)
+        }
+        
+        lastCheckedDuration = silenceDuration
+      }, 2000) // Check every 2 seconds (reduced frequency to prevent rapid emissions)
+      
+      setSilenceMonitorInterval(monitorSilence)
+      
+      return () => {
+        if (monitorSilence) {
+          clearInterval(monitorSilence)
+        }
+      }
+    } else {
+      // Clear interval if conditions not met
+      if (silenceMonitorInterval) {
+        clearInterval(silenceMonitorInterval)
+        setSilenceMonitorInterval(null)
+      }
+    }
+  }, [sessionStatus, currentQuestion, socket, geminiSession, canStartAnswer, lastSpeechTime, candidateSpeaking])
+
   const handleTimeUp = () => {
     toast.error('Time\'s up! Interview will be submitted automatically.')
     completeInterview()
@@ -191,22 +294,67 @@ export default function InterviewSession() {
       interviewDataRef.current = interviewData
       
       // Ensure interview is started before initializing session
+      let candidateInterviewId = id // Default to template ID
+      let interviewToUse = interviewData
+      
       if (interviewData.status === 'invited') {
         console.log('Interview not started yet, starting now...')
         try {
-          await interviewAPI.startInterview(id)
-          // Reload interview data to get updated status
-          const updatedResponse = await interviewAPI.getById(id)
-          const updatedInterview = updatedResponse.data.interview
-          setInterview(updatedInterview)
-          interviewDataRef.current = updatedInterview
+          const startResponse = await interviewAPI.startInterview(id)
+          // The startInterview API now returns the candidate-specific interview ID
+          candidateInterviewId = startResponse.data.interview.id
+          candidateInterviewIdRef.current = candidateInterviewId
+          console.log('✅ Candidate-specific interview ID:', candidateInterviewId)
+          
+          // Load the candidate-specific interview data
+          const updatedResponse = await interviewAPI.getById(candidateInterviewId)
+          interviewToUse = updatedResponse.data.interview
+          setInterview(interviewToUse)
+          interviewDataRef.current = interviewToUse
         } catch (startError) {
           console.error('Error starting interview:', startError)
           toast.error('Failed to start interview. Please try again.')
           setSessionStatus('error')
           return
         }
-      } else if (interviewData.status !== 'in_progress' && interviewData.status !== 'completed') {
+      } else if (interviewData.status === 'in_progress' || interviewData.status === 'completed') {
+        // Check if this is a candidate-specific interview (has candidateId/candidateEmail)
+        if (interviewData.candidateId || interviewData.candidateEmail) {
+          // This is already a candidate-specific interview
+          candidateInterviewId = interviewData.id || id
+          candidateInterviewIdRef.current = candidateInterviewId
+          console.log('✅ Using existing candidate interview ID:', candidateInterviewId)
+        } else {
+          // This is a template, need to find or create candidate-specific interview
+          console.log('Template detected, finding candidate-specific interview...')
+          // Try to find existing candidate interview attempt
+          const allInterviews = await interviewAPI.getAll()
+          const candidateAttempt = allInterviews.data.interviews.find(
+            inv => inv.title === interviewData.title && 
+                   (inv.candidateId || inv.candidateEmail) &&
+                   inv.status === 'in_progress'
+          )
+          
+          if (candidateAttempt) {
+            candidateInterviewId = candidateAttempt.id
+            candidateInterviewIdRef.current = candidateInterviewId
+            interviewToUse = candidateAttempt
+            setInterview(interviewToUse)
+            interviewDataRef.current = interviewToUse
+            console.log('✅ Found existing candidate interview:', candidateInterviewId)
+          } else {
+            // Start new attempt
+            const startResponse = await interviewAPI.startInterview(id)
+            candidateInterviewId = startResponse.data.interview.id
+            candidateInterviewIdRef.current = candidateInterviewId
+            const updatedResponse = await interviewAPI.getById(candidateInterviewId)
+            interviewToUse = updatedResponse.data.interview
+            setInterview(interviewToUse)
+            interviewDataRef.current = interviewToUse
+            console.log('✅ Created new candidate interview:', candidateInterviewId)
+          }
+        }
+      } else {
         console.error(`Interview is in invalid status: ${interviewData.status}`)
         toast.error(`Interview cannot be started. Current status: ${interviewData.status}`)
         setSessionStatus('error')
@@ -291,19 +439,30 @@ export default function InterviewSession() {
           return
         }
         
+        // Use candidate-specific interview ID for socket operations
+        const interviewIdForSocket = candidateInterviewIdRef.current || id
         newSocket.emit('join-interview', { 
-          interviewId: id, 
+          interviewId: interviewIdForSocket, 
           userRole: user?.role || 'candidate' 
         })
-        console.log('Emitted join-interview')
+        console.log('Emitted join-interview with interview ID:', interviewIdForSocket)
+        
+        // Phase 2: Start audio streaming if stream is available
+        if (streamRef.current && geminiSession) {
+          setTimeout(() => {
+            startAudioStreaming(streamRef.current)
+          }, 500) // Small delay to ensure everything is ready
+        }
         
         // Emit start-gemini-session after socket is connected and interview is joined
         // Small delay to ensure join-interview is processed
         setTimeout(() => {
           if (newSocket.connected) {
             console.log('Starting Gemini session...')
+            // Use candidate-specific interview ID for socket operations
+            const interviewIdForSocket = candidateInterviewIdRef.current || id
             newSocket.emit('start-gemini-session', {
-              interviewId: id,
+              interviewId: interviewIdForSocket,
               candidateId: user?.id || user?._id || 'anonymous'
             })
             console.log('Emitted start-gemini-session')
@@ -341,6 +500,13 @@ export default function InterviewSession() {
         }
         setGeminiSession(data.sessionId)
         setSessionStatus('ready')
+        
+        // Phase 2: Start audio streaming if stream is available
+        if (streamRef.current && newSocket.connected) {
+          setTimeout(() => {
+            startAudioStreaming(streamRef.current)
+          }, 500)
+        }
         
         // Set the first question if provided (but don't display it yet - wait for speech)
         if (data.firstQuestion) {
@@ -427,6 +593,184 @@ export default function InterviewSession() {
         }
       })
       
+      // Phase 1: Real-time conversation event handlers
+      newSocket.on('bot-deflection', (data) => {
+        console.log('Bot deflection:', data)
+        setBotDeflection(data)
+        // Speak the deflection message
+        if (data.message) {
+          speakText(data.message).catch(err => {
+            console.error('Error speaking deflection:', err)
+          })
+        }
+        // Clear after 5 seconds
+        setTimeout(() => setBotDeflection(null), 5000)
+      })
+      
+      newSocket.on('bot-intervention', (data) => {
+        console.log('Bot intervention:', data)
+        setBotIntervention(data)
+        // Speak the intervention message
+        if (data.message) {
+          speakText(data.message).catch(err => {
+            console.error('Error speaking intervention:', err)
+          })
+        }
+        // Clear after 8 seconds
+        setTimeout(() => setBotIntervention(null), 8000)
+      })
+      
+      newSocket.on('bot-acknowledgment', (data) => {
+        console.log('Bot acknowledgment:', data)
+        setBotAcknowledgment(data)
+        
+        // Phase 2: For real-time acknowledgments, don't speak them (too interruptive)
+        // Only speak if it's a significant acknowledgment (not realtime type)
+        if (data.message && data.type !== 'realtime') {
+          speakText(data.message).catch(err => {
+            console.error('Error speaking acknowledgment:', err)
+          })
+        }
+        
+        // Clear after shorter time for real-time (2s) vs regular (3s)
+        const clearTime = data.type === 'realtime' ? 2000 : 3000
+        setTimeout(() => setBotAcknowledgment(null), clearTime)
+      })
+      
+      newSocket.on('bot-clarification', (data) => {
+        console.log('Bot clarification:', data)
+        // Speak the clarification
+        if (data.message) {
+          speakText(data.message).catch(err => {
+            console.error('Error speaking clarification:', err)
+          })
+        }
+        toast.success('Clarification provided')
+      })
+      
+      newSocket.on('followup-question-ready', async (data) => {
+        console.log('Follow-up question ready:', data)
+        const followupQ = data.followupQuestion
+        
+        // Add to interview questions
+        setInterview(prev => {
+          const exists = prev?.questions?.find(q => q.id === followupQ.id)
+          if (!exists) {
+            return {
+              ...prev,
+              questions: [...(prev?.questions || []), followupQ]
+            }
+          }
+          return prev
+        })
+        
+        // Ask the follow-up question after a brief pause (if candidate is still speaking, wait)
+        // For now, we'll ask it after 2 seconds to allow candidate to finish current thought
+        setTimeout(async () => {
+          // Only ask if we're still on the same question
+          if (currentQuestion && currentQuestion.id === data.questionId) {
+            setCurrentQuestion(followupQ)
+            currentQuestionIdRef.current = followupQ.id
+            
+            // Reset silence monitoring
+            setLastSpeechTime(null)
+            
+            // Notify server
+            if (socket && geminiSession) {
+              socket.emit('question-started', {
+                sessionId: geminiSession,
+                questionId: followupQ.id,
+                questionText: followupQ.text
+              })
+            }
+            
+            // Speak the follow-up question
+            try {
+              await speakQuestion(followupQ)
+              setCanStartAnswer(true)
+            } catch (error) {
+              console.error('Error speaking follow-up question:', error)
+              setCanStartAnswer(true)
+            }
+          }
+        }, 2000) // Wait 2 seconds before asking follow-up
+      })
+      
+      newSocket.on('next-question-generated', (data) => {
+        console.log('Next question generated:', data)
+        if (data.question) {
+          // Prevent duplicate questions - check if this question already exists
+          setInterview(prev => {
+            const questionExists = prev?.questions?.some(q => q.id === data.question.id)
+            if (questionExists) {
+              console.log('Question already exists, skipping:', data.question.id)
+              return prev
+            }
+            return {
+              ...prev,
+              questions: [...prev.questions, data.question]
+            }
+          })
+          
+          // IMPORTANT: Don't jump to next question if candidate is currently speaking
+          // Wait until they finish speaking before moving to next question
+          const checkAndProceed = () => {
+            // Don't proceed if candidate is speaking
+            if (candidateSpeaking) {
+              console.log('Candidate is speaking, delaying question change')
+              setTimeout(checkAndProceed, 1000) // Check again in 1 second
+              return
+            }
+            
+            // Only proceed if we're not already on a different question
+            // This prevents jumping multiple questions
+            const currentQId = currentQuestionIdRef.current
+            if (currentQId && currentQId !== data.question.id) {
+              // Check if we're already processing a question change
+              setTimeout(() => {
+                // Double-check we're still not on a different question and candidate isn't speaking
+                if ((currentQuestionIdRef.current === currentQId || !currentQuestion) && !candidateSpeaking) {
+                  setCurrentQuestion(data.question)
+                  currentQuestionIdRef.current = data.question.id
+                  speakQuestion(data.question).then(() => {
+                    setCanStartAnswer(true)
+                  }).catch(err => {
+                    console.error('Error speaking next question:', err)
+                    setCanStartAnswer(true)
+                  })
+                } else {
+                  console.log('Skipping question - already moved to different question or candidate is speaking')
+                }
+              }, 1000)
+            } else if (!currentQuestion || currentQuestion.id !== data.question.id) {
+              // Only set if we don't have a current question or it's different
+              setTimeout(() => {
+                if (!candidateSpeaking) {
+                  setCurrentQuestion(data.question)
+                  currentQuestionIdRef.current = data.question.id
+                  speakQuestion(data.question).then(() => {
+                    setCanStartAnswer(true)
+                  }).catch(err => {
+                    console.error('Error speaking next question:', err)
+                    setCanStartAnswer(true)
+                  })
+                } else {
+                  console.log('Candidate is speaking, delaying question change')
+                  setTimeout(checkAndProceed, 1000)
+                }
+              }, 1000)
+            }
+          }
+          
+          checkAndProceed()
+        }
+      })
+      
+      newSocket.on('interview-complete', (data) => {
+        console.log('Interview complete:', data)
+        completeInterview()
+      })
+      
       // Initialize camera and audio
       await initializeMedia()
       
@@ -481,12 +825,266 @@ export default function InterviewSession() {
       // Initialize audio recording
       initializeAudioRecording(stream)
       
+      // Phase 2: Initialize VAD and audio streaming
+      initializeVAD(stream)
+      
       console.log('Media initialized successfully')
     } catch (error) {
       console.error('Error accessing media:', error)
       toast.error('Camera/microphone access denied. Please allow access.')
       setSessionStatus('error')
     }
+  }
+
+  // Phase 2: Initialize Voice Activity Detection (VAD)
+  const initializeVAD = (stream) => {
+    try {
+      // Create AudioContext for VAD
+      const AudioContext = window.AudioContext || window.webkitAudioContext
+      if (!AudioContext) {
+        console.warn('AudioContext not supported, VAD disabled')
+        return
+      }
+
+      const audioContext = new AudioContext({ sampleRate: 16000 })
+      audioContextRef.current = audioContext
+
+      // Get audio track from stream
+      const audioTracks = stream.getAudioTracks()
+      if (audioTracks.length === 0) {
+        console.warn('No audio tracks available for VAD')
+        return
+      }
+
+      // Create media stream source
+      const source = audioContext.createMediaStreamSource(stream)
+      audioStreamRef.current = source
+
+      // Create analyser node for audio analysis
+      const analyser = audioContext.createAnalyser()
+      analyser.fftSize = 2048
+      analyser.smoothingTimeConstant = 0.8
+      analyserNodeRef.current = analyser
+
+      // Connect source to analyser
+      source.connect(analyser)
+
+      // Start VAD monitoring
+      startVADMonitoring()
+
+      // Start audio chunk streaming (for bi-directional audio)
+      // Will be started when socket is ready (see socket connect handler)
+      if (socket && geminiSession) {
+        startAudioStreaming(stream)
+      }
+
+      console.log('VAD initialized successfully')
+    } catch (error) {
+      console.error('Error initializing VAD:', error)
+      // Don't fail the whole initialization if VAD fails
+    }
+  }
+
+  // Phase 2: Start VAD monitoring
+  const startVADMonitoring = () => {
+    if (!analyserNodeRef.current) return
+
+    const analyser = analyserNodeRef.current
+    const bufferLength = analyser.frequencyBinCount
+    const dataArray = new Uint8Array(bufferLength)
+
+    const checkVAD = () => {
+      if (!analyserNodeRef.current || !socket || !geminiSession) return
+
+      analyser.getByteFrequencyData(dataArray)
+
+      // Calculate audio energy (RMS)
+      let sum = 0
+      for (let i = 0; i < bufferLength; i++) {
+        sum += dataArray[i] * dataArray[i]
+      }
+      const rms = Math.sqrt(sum / bufferLength) / 255 // Normalize to 0-1
+      const energy = rms
+
+      // Update audio energy for visualization
+      setAudioEnergy(energy)
+
+      // Adaptive threshold (adjusts based on environment)
+      const threshold = vadThresholdRef.current
+      const isSpeaking = energy > threshold
+
+      // Update state if changed
+      if (isSpeaking !== lastVADStateRef.current) {
+        lastVADStateRef.current = isSpeaking
+        setCandidateSpeaking(isSpeaking)
+
+        if (isSpeaking) {
+          // Candidate started speaking
+          candidateSpeakingStartTimeRef.current = Date.now()
+          silenceDurationRef.current = 0
+          
+          // Update lastSpeechTime when candidate starts speaking - prevents silence detection
+          setLastSpeechTime(Date.now())
+          
+          // Update conversation state
+          setConversationState(prevState => {
+            if (prevState === 'listening' || prevState === 'idle') {
+              // If bot is speaking, don't interrupt immediately - wait for natural pause
+              // This is handled in the turn management logic
+              return 'candidate_speaking'
+            }
+            return prevState
+          })
+
+          // Emit VAD event to server
+          if (socket && geminiSession) {
+            socket.emit('vad-detected', {
+              sessionId: geminiSession,
+              isSpeaking: true,
+              energy: energy,
+              timestamp: Date.now()
+            })
+          }
+        } else {
+          // Candidate stopped speaking
+          const speakingDuration = candidateSpeakingStartTimeRef.current 
+            ? Date.now() - candidateSpeakingStartTimeRef.current 
+            : 0
+          
+          // Update conversation state
+          setConversationState(prevState => {
+            if (prevState === 'candidate_speaking') {
+              return 'listening'
+            }
+            return prevState
+          })
+
+          // Emit VAD event to server
+          if (socket && geminiSession) {
+            socket.emit('vad-detected', {
+              sessionId: geminiSession,
+              isSpeaking: false,
+              energy: energy,
+              silenceDuration: silenceDurationRef.current,
+              speakingDuration: speakingDuration,
+              timestamp: Date.now()
+            })
+          }
+
+          // Reset speaking start time
+          candidateSpeakingStartTimeRef.current = null
+        }
+      }
+
+      // Update silence duration
+      if (!isSpeaking) {
+        silenceDurationRef.current += 100 // Add 100ms (check interval)
+      } else {
+        silenceDurationRef.current = 0
+      }
+
+      // Adaptive threshold adjustment (learn from environment)
+      if (energy > 0.001) {
+        // Gradually adjust threshold based on actual audio levels
+        vadThresholdRef.current = vadThresholdRef.current * 0.99 + energy * 0.01
+      }
+    }
+
+    // Check VAD every 100ms for responsive detection
+    vadIntervalRef.current = setInterval(checkVAD, 100)
+  }
+
+  // Phase 2: Start audio streaming for bi-directional communication
+  const startAudioStreaming = (stream) => {
+    // Check if already streaming
+    if (audioChunkIntervalRef.current) {
+      console.log('Audio streaming already started')
+      return
+    }
+
+    // Wait for socket and session to be ready
+    const checkAndStart = () => {
+      if (!socket || !socket.connected || !geminiSession) {
+        console.warn('Socket or session not ready for audio streaming, will retry')
+        setTimeout(checkAndStart, 1000)
+        return
+      }
+
+    try {
+      // Create AudioContext for streaming
+      const AudioContext = window.AudioContext || window.webkitAudioContext
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext({ sampleRate: 16000 })
+      }
+
+      const audioContext = audioContextRef.current
+      const source = audioContext.createMediaStreamSource(stream)
+
+      // Create script processor for audio chunks (4096 samples = ~250ms at 16kHz)
+      const processor = audioContext.createScriptProcessor(4096, 1, 1)
+      
+      processor.onaudioprocess = (e) => {
+        if (!socket || !socket.connected || !geminiSession) return
+
+        const inputData = e.inputBuffer.getChannelData(0)
+        
+        // Convert Float32Array to Int16Array for transmission
+        const int16Array = new Int16Array(inputData.length)
+        for (let i = 0; i < inputData.length; i++) {
+          // Clamp and convert to 16-bit PCM
+          const s = Math.max(-1, Math.min(1, inputData[i]))
+          int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
+        }
+
+        // Convert to base64 for transmission
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(int16Array.buffer)))
+
+        // Emit audio chunk to server
+        socket.emit('audio-chunk', {
+          sessionId: geminiSession,
+          audioData: base64,
+          sampleRate: 16000,
+          timestamp: Date.now()
+        })
+      }
+
+      source.connect(processor)
+      processor.connect(audioContext.destination) // Required for script processor to work
+
+      // Mark as started
+      audioChunkIntervalRef.current = true // Use as flag
+
+      console.log('Audio streaming started')
+    } catch (error) {
+      console.error('Error starting audio streaming:', error)
+      // Don't fail if audio streaming fails
+    }
+    }
+
+    // Start the check loop
+    checkAndStart()
+  }
+
+  // Phase 2: Stop VAD and audio streaming
+  const stopVAD = () => {
+    if (vadIntervalRef.current) {
+      clearInterval(vadIntervalRef.current)
+      vadIntervalRef.current = null
+    }
+
+    if (audioChunkIntervalRef.current) {
+      clearInterval(audioChunkIntervalRef.current)
+      audioChunkIntervalRef.current = null
+    }
+
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      audioContextRef.current.close().catch(err => {
+        console.error('Error closing audio context:', err)
+      })
+    }
+
+    setCandidateSpeaking(false)
+    setConversationState('idle')
   }
 
   const initializeSpeechRecognition = () => {
@@ -568,7 +1166,41 @@ export default function InterviewSession() {
           
           if (!transcript) continue
           
+          // Update lastSpeechTime for interim results to prevent silence detection during active speech
+          if (!result.isFinal) {
+            setLastSpeechTime(Date.now())
+          }
+          
           if (result.isFinal) {
+            // Update lastSpeechTime for final results as well
+            setLastSpeechTime(Date.now())
+            
+            // Check if candidate said they're done with their answer
+            const transcriptLower = transcript.toLowerCase().trim()
+            const completionPhrases = [
+              "i'm done", "i am done", "that's all", "thats all", "that is all",
+              "i'm finished", "i am finished", "i finished", "finished",
+              "that's it", "thats it", "that is it", "done", "complete",
+              "i'm complete", "i am complete", "i complete", "all done",
+              "nothing more", "no more", "end of answer", "end of my answer"
+            ]
+            
+            const isAnswerComplete = completionPhrases.some(phrase => 
+              transcriptLower.includes(phrase) || 
+              transcriptLower.endsWith(phrase) ||
+              transcriptLower.startsWith(phrase)
+            )
+            
+            if (isAnswerComplete && currentQuestion && isRecording) {
+              console.log('✅ Candidate indicated answer is complete, processing answer...')
+              // Stop answering and process the answer
+              setTimeout(() => {
+                stopAnswering().catch(err => {
+                  console.error('Error stopping answer:', err)
+                })
+              }, 500) // Small delay to ensure final transcript is captured
+            }
+            
             // Create a unique key for this result
             const resultKey = `final-${i}-${Date.now()}`
             
@@ -606,9 +1238,40 @@ export default function InterviewSession() {
             
             // Mark this result index as processed
             processedResultsRef.current.add(i)
+            
+            // Phase 1: Send transcript chunk to server for real-time processing
+            if (socket && geminiSession && currentQuestion) {
+              socket.emit('transcript-chunk', {
+                sessionId: geminiSession,
+                questionId: currentQuestion.id,
+                questionText: currentQuestion.text,
+                transcriptChunk: transcript.trim(),
+                isFinal: true,
+                timestamp: Date.now()
+              })
+              
+              // Update last speech time for silence monitoring
+              setLastSpeechTime(Date.now())
+              
+              // Check if this is a response to bot intervention (e.g., "yes", "no", "I'm thinking")
+              if (botIntervention || botDeflection) {
+                // Send candidate response for intent detection
+                socket.emit('candidate-response', {
+                  sessionId: geminiSession,
+                  questionId: currentQuestion.id,
+                  transcript: transcript.trim()
+                })
+              }
+            }
           } else {
             // For interim results, always show the latest one (they're temporary anyway)
             currentInterimTranscript = transcript
+            
+            // Update lastSpeechTime on interim results too - candidate is actively speaking
+            // This prevents silence detection from triggering while they're speaking
+            if (socket && geminiSession && currentQuestion) {
+              setLastSpeechTime(Date.now())
+            }
           }
         }
 
@@ -873,6 +1536,7 @@ export default function InterviewSession() {
       currentUtteranceRef.current = utterance
       speakingRef.current = true
       setIsSpeaking(true)
+      setConversationState('bot_speaking') // Phase 2: Update conversation state
       
       let resolved = false
       let speechStarted = false
@@ -916,6 +1580,7 @@ export default function InterviewSession() {
         setIsSpeaking(false)
         speakingRef.current = false
         currentUtteranceRef.current = null
+        setConversationState('listening') // Phase 2: Bot finished speaking, now listening
         if (!resolved) {
           resolved = true
           resolve()
@@ -1013,6 +1678,75 @@ export default function InterviewSession() {
       questionTimestampsRef.current[questionId].questionEndTime = currentQuestionEndTimeRef.current
     }
     console.log('Question finished speaking at:', currentQuestionEndTimeRef.current)
+    
+    // Phase 1: Initialize silence monitoring - set lastSpeechTime to question end
+    // This starts the silence timer from when question finishes
+    setLastSpeechTime(currentQuestionEndTimeRef.current)
+    
+    // Notify server that question has finished (for conversation state tracking)
+    if (socket && geminiSession) {
+      socket.emit('question-started', {
+        sessionId: geminiSession,
+        questionId: questionId,
+        questionText: questionText
+      })
+    }
+    
+    // Automatically start speech recognition and answer tracking after question finishes
+    // This allows the system to detect when candidate starts speaking
+    try {
+      // Reset transcript tracking for new answer
+      setTranscript('')
+      finalTranscriptRef.current = ''
+      processedResultsRef.current.clear()
+      lastFinalWordsRef.current = []
+      
+      // Clear captured frames for new answer
+      setCapturedFrames([])
+      
+      // Clear any pending transcript updates
+      if (transcriptUpdateTimeoutRef.current) {
+        clearTimeout(transcriptUpdateTimeoutRef.current)
+        transcriptUpdateTimeoutRef.current = null
+      }
+      
+      // Start speech recognition automatically
+      if (recognitionRef.current) {
+        try {
+          if (recognitionRef.current.state && recognitionRef.current.state !== 'running') {
+            recognitionRef.current.start()
+            console.log('Speech recognition started automatically after question')
+          } else if (!recognitionRef.current.state) {
+            // If state property doesn't exist, just try to start
+            recognitionRef.current.start()
+            console.log('Speech recognition started automatically after question')
+          }
+        } catch (startError) {
+          // If already started, that's fine
+          if (startError.message?.includes('already started') || startError.message?.includes('start')) {
+            console.log('Speech recognition already running')
+          } else {
+            console.error('Error starting speech recognition automatically:', startError)
+          }
+        }
+      }
+      
+      // Track when candidate can start answering (now - automatically)
+      currentAnswerStartTimeRef.current = Date.now()
+      if (questionId && questionTimestampsRef.current[questionId]) {
+        questionTimestampsRef.current[questionId].answerStartTime = currentAnswerStartTimeRef.current
+      }
+      console.log('Answer start time tracked automatically:', currentAnswerStartTimeRef.current)
+      
+      // Set answering flag so system knows candidate is answering
+      isAnsweringRef.current = true
+      
+      // Start frame capture for cheating detection
+      startFrameCapture()
+    } catch (error) {
+      console.error('Error auto-starting answer tracking:', error)
+      // Don't throw - this is not critical, just log it
+    }
   }
 
   const startAnswering = () => {
@@ -1164,6 +1898,9 @@ export default function InterviewSession() {
     const answeredQuestionText = currentQuestion.text
     currentQuestionIdRef.current = answeredQuestionId // Store in ref for processAnswer
     
+    // IMPORTANT: Save transcript BEFORE clearing it, so processAnswer can use it
+    const savedTranscript = finalTranscriptRef.current.trim() || transcript.trim()
+    
     // Immediately clear transcript and prepare for next interaction
     setTranscript('')
     finalTranscriptRef.current = ''
@@ -1181,8 +1918,8 @@ export default function InterviewSession() {
     
     // Process the answer in background - don't await, let it run asynchronously
     // This allows the UI to continue naturally while processing happens
-    // Pass question text via closure
-    processAnswer(answeredQuestionText).catch(error => {
+    // Pass question text and saved transcript via closure
+    processAnswer(answeredQuestionText, savedTranscript).catch(error => {
       console.error('Error processing answer in background:', error)
       toast.error('Failed to process answer: ' + (error.message || 'Unknown error'))
       // Re-enable button on error so user can retry
@@ -1190,7 +1927,7 @@ export default function InterviewSession() {
     })
   }
 
-  const processAnswer = async (questionTextOverride = null) => {
+  const processAnswer = async (questionTextOverride = null, savedTranscriptOverride = null) => {
     // Get questionId from ref (we may have cleared currentQuestion state)
     // This is set before we clear the question in stopAnswering
     const questionId = currentQuestionIdRef.current
@@ -1203,8 +1940,8 @@ export default function InterviewSession() {
     }
 
     // If no video recorded but we have transcript, still process
-    // Use ref to get the transcript at the time of processing
-    const currentTranscript = finalTranscriptRef.current.trim() || transcript.trim()
+    // Use saved transcript if provided (from stopAnswering), otherwise try ref/state
+    const currentTranscript = savedTranscriptOverride || finalTranscriptRef.current.trim() || transcript.trim()
     if (videoChunks.length === 0 && !currentTranscript) {
       console.warn('No response recorded')
       toast.error('No response recorded')
@@ -1365,31 +2102,62 @@ export default function InterviewSession() {
   }
 
   const submitAnswerWithVideo = async (videoBlob, geminiResponse, finalTranscript, questionId, questionText) => {
-    try {
-      // Use provided questionId or fallback to currentQuestion
-      const questionIdToUse = questionId || currentQuestion?.id || currentQuestionIdRef.current
-      const questionTextToUse = questionText || currentQuestion?.text || ''
-      
-      if (!questionIdToUse) {
-        throw new Error('Question ID is required to submit answer')
+    // Use provided questionId or fallback to currentQuestion
+    const questionIdToUse = questionId || currentQuestion?.id || currentQuestionIdRef.current
+    const questionTextToUse = questionText || currentQuestion?.text || ''
+    
+    if (!questionIdToUse) {
+      throw new Error('Question ID is required to submit answer')
+    }
+    
+    // Upload video with retry mechanism
+    let videoUrl = ''
+    const maxRetries = 3
+    let retryCount = 0
+    let uploadSuccess = false
+    
+    // Use candidate-specific interview ID, not template ID
+    const interviewIdToUse = candidateInterviewIdRef.current || id
+    
+    while (retryCount < maxRetries && !uploadSuccess) {
+      try {
+        console.log(`Uploading video (attempt ${retryCount + 1}/${maxRetries})...`)
+        const response = await uploadAPI.uploadVideo(interviewIdToUse, questionIdToUse, videoBlob)
+        videoUrl = response.data.fileUrl
+        uploadSuccess = true
+        console.log('✅ Video uploaded successfully:', videoUrl)
+      } catch (uploadError) {
+        retryCount++
+        console.error(`Video upload attempt ${retryCount} failed:`, uploadError)
+        
+        if (retryCount >= maxRetries) {
+          console.error('❌ Video upload failed after all retries. Proceeding without video URL.')
+          toast.error('Video upload failed after multiple attempts. Answer will be saved without video.')
+          // Continue without video - don't block answer submission
+        } else {
+          // Wait before retrying (exponential backoff)
+          const delay = Math.min(1000 * Math.pow(2, retryCount - 1), 5000)
+          console.log(`Retrying video upload in ${delay}ms...`)
+          await new Promise(resolve => setTimeout(resolve, delay))
+        }
       }
-      
-      // Upload video (with audio) - happens in background
-      const response = await uploadAPI.uploadVideo(id, questionIdToUse, videoBlob)
-      const videoUrl = response.data.fileUrl
+    }
 
-      // Submit answer with Gemini response - happens in background
-      await interviewAPI.submitAnswer(id, questionIdToUse, {
-        videoUrl: videoUrl,
+    // Submit answer with Gemini response - always submit even if video upload failed
+    // Use candidate-specific interview ID, not template ID
+    try {
+      await interviewAPI.submitAnswer(interviewIdToUse, questionIdToUse, {
+        videoUrl: videoUrl, // Will be empty string if upload failed
         transcript: finalTranscript || geminiResponse.transcript || '',
         geminiResponse: {
           ...geminiResponse,
           questionText: questionTextToUse
         }
       })
-    } catch (error) {
-      console.error('Error submitting answer:', error)
-      throw error
+      console.log('✅ Answer submitted successfully')
+    } catch (submitError) {
+      console.error('Error submitting answer:', submitError)
+      throw submitError
     }
   }
 
@@ -1404,7 +2172,9 @@ export default function InterviewSession() {
       }
       
       // Submit answer without video (transcript only) - happens in background
-      await interviewAPI.submitAnswer(id, questionIdToUse, {
+      // Use candidate-specific interview ID, not template ID
+      const interviewIdToUse = candidateInterviewIdRef.current || id
+      await interviewAPI.submitAnswer(interviewIdToUse, questionIdToUse, {
         videoUrl: '', // No video URL
         transcript: finalTranscript || geminiResponse.transcript || '',
         geminiResponse: {
@@ -1445,13 +2215,39 @@ export default function InterviewSession() {
       }
       
       const followUpQuestion = {
-        id: question.id + '_followup',
+        id: question.id + '_followup_' + Date.now(),
         text: response.next_text || question.text,
         type: 'followup',
-        order: question.order
+        order: question.order,
+        parentQuestionId: question.id
       }
+      
+      // Add to interview questions if not already there
+      setInterview(prev => {
+        const exists = prev?.questions?.find(q => q.id === followUpQuestion.id)
+        if (!exists) {
+          return {
+            ...prev,
+            questions: [...(prev?.questions || []), followUpQuestion]
+          }
+        }
+        return prev
+      })
+      
       setCurrentQuestion(followUpQuestion)
       currentQuestionIdRef.current = followUpQuestion.id // Update ref with follow-up question ID
+      
+      // Reset silence monitoring for new question
+      setLastSpeechTime(null)
+      
+      // Notify server
+      if (socket && geminiSession) {
+        socket.emit('question-started', {
+          sessionId: geminiSession,
+          questionId: followUpQuestion.id,
+          questionText: followUpQuestion.text
+        })
+      }
       
       // Wait a moment, then speak the follow-up question
       await new Promise(resolve => setTimeout(resolve, 1000))
@@ -1482,6 +2278,18 @@ export default function InterviewSession() {
         
         setCurrentQuestion(newQuestion)
         currentQuestionIdRef.current = newQuestion.id // Update ref with new question ID
+        
+        // Reset silence monitoring for new question
+        setLastSpeechTime(null)
+        
+        // Notify server
+        if (socket && geminiSession) {
+          socket.emit('question-started', {
+            sessionId: geminiSession,
+            questionId: newQuestion.id,
+            questionText: newQuestion.text
+          })
+        }
         
         try {
           await speakQuestion(newQuestion)
@@ -1612,6 +2420,41 @@ export default function InterviewSession() {
 
   const completeInterview = async () => {
     try {
+      console.log('🔄 Starting interview completion process...')
+      
+      // First, process any pending answer if candidate is currently answering
+      if (currentQuestion && isRecording && isAnsweringRef.current) {
+        console.log('📝 Processing pending answer before completion...')
+        try {
+          // Stop the current answer recording
+          await stopAnswering()
+          // Wait a bit for answer processing to complete
+          await new Promise(resolve => setTimeout(resolve, 2000))
+        } catch (answerError) {
+          console.error('Error processing pending answer:', answerError)
+          // Continue with completion even if answer processing fails
+        }
+      }
+      
+      // Stop all ongoing processes
+      if (isRecording && mediaRecorderRef.current) {
+        try {
+          mediaRecorderRef.current.stop()
+          setIsRecording(false)
+          await new Promise(resolve => setTimeout(resolve, 1000))
+        } catch (e) {
+          console.error('Error stopping recording:', e)
+        }
+      }
+      
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop()
+        } catch (e) {
+          console.error('Error stopping recognition:', e)
+        }
+      }
+      
       // Stop full session recording if it's running
       if (fullSessionRecorderRef.current && fullSessionRecorderRef.current.state === 'recording') {
         fullSessionRecorderRef.current.stop()
@@ -1639,16 +2482,18 @@ export default function InterviewSession() {
         // Create blob from full session chunks and upload
         if (fullSessionChunksRef.current.length > 0) {
           const fullSessionBlob = new Blob(fullSessionChunksRef.current, { type: 'video/webm' })
-          console.log('Uploading full session video, size:', fullSessionBlob.size)
+          console.log('📹 Uploading full session video, size:', fullSessionBlob.size)
           
           try {
             // Upload full session video (use a placeholder questionId since it's not question-specific)
-            const uploadResponse = await uploadAPI.uploadVideo(id, 'full-session', fullSessionBlob, true)
+            // Use candidate-specific interview ID, not template ID
+            const interviewIdToUse = candidateInterviewIdRef.current || id
+            const uploadResponse = await uploadAPI.uploadVideo(interviewIdToUse, 'full-session', fullSessionBlob, true)
             const fullSessionVideoUrl = uploadResponse.data.fileUrl
-            console.log('Full session video uploaded:', fullSessionVideoUrl)
+            console.log('✅ Full session video uploaded:', fullSessionVideoUrl)
             
             // Pass full session video URL to completeInterview
-            await interviewAPI.completeInterview(id, fullSessionVideoUrl)
+            await interviewAPI.completeInterview(interviewIdToUse, fullSessionVideoUrl)
             setSessionStatus('completed')
             toast.success('Interview completed successfully!')
             
@@ -1665,7 +2510,10 @@ export default function InterviewSession() {
       }
       
       // Complete interview (without full session video if upload failed or wasn't available)
-      await interviewAPI.completeInterview(id)
+      // Use candidate-specific interview ID, not template ID
+      const interviewIdToUse = candidateInterviewIdRef.current || id
+      console.log('✅ Completing interview with ID:', interviewIdToUse)
+      await interviewAPI.completeInterview(interviewIdToUse)
       setSessionStatus('completed')
       toast.success('Interview completed successfully!')
       
@@ -1789,6 +2637,7 @@ export default function InterviewSession() {
                 <h3 className="text-lg font-bold text-white">AI Interviewer</h3>
                 <p className="text-sm text-gray-400">Ready to help you succeed</p>
               </div>
+              {/* Phase 2: Enhanced speaking state indicators */}
               {isSpeaking && (
                 <div className="flex items-center space-x-2 bg-blue-500/20 backdrop-blur-sm px-4 py-2 rounded-xl border border-blue-500/30">
                   <div className="flex space-x-1">
@@ -1796,7 +2645,13 @@ export default function InterviewSession() {
                     <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
                     <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
                   </div>
-                  <span className="text-sm font-bold text-blue-300">Speaking...</span>
+                  <span className="text-sm font-bold text-blue-300">Bot Speaking...</span>
+                </div>
+              )}
+              {conversationState === 'listening' && !isSpeaking && (
+                <div className="flex items-center space-x-2 bg-purple-500/20 backdrop-blur-sm px-4 py-2 rounded-xl border border-purple-500/30">
+                  <div className="w-2 h-2 bg-purple-400 rounded-full animate-pulse"></div>
+                  <span className="text-sm font-bold text-purple-300">Listening...</span>
                 </div>
               )}
             </div>
@@ -1810,6 +2665,26 @@ export default function InterviewSession() {
                 <h4 className="text-sm font-bold text-gray-300 uppercase tracking-wide">Question</h4>
               </div>
               <div className="flex-1 overflow-y-auto">
+                {/* Phase 1: Show bot interventions and deflections */}
+                {botIntervention && (
+                  <div className="mb-4 p-4 bg-blue-500/20 backdrop-blur-sm rounded-xl border border-blue-500/30">
+                    <p className="text-blue-200 text-base leading-relaxed font-medium">{botIntervention.message}</p>
+                    <p className="text-blue-400 text-xs mt-2">Bot Intervention</p>
+                  </div>
+                )}
+                {botDeflection && (
+                  <div className="mb-4 p-4 bg-amber-500/20 backdrop-blur-sm rounded-xl border border-amber-500/30">
+                    <p className="text-amber-200 text-base leading-relaxed font-medium">{botDeflection.message}</p>
+                    <p className="text-amber-400 text-xs mt-2">Note: Please answer the question I asked</p>
+                  </div>
+                )}
+                {botAcknowledgment && (
+                  <div className="mb-4 p-4 bg-green-500/20 backdrop-blur-sm rounded-xl border border-green-500/30">
+                    <p className="text-green-200 text-base leading-relaxed font-medium">{botAcknowledgment.message}</p>
+                  </div>
+                )}
+                
+                {/* Regular question display */}
                 {botGreeting ? (
                   <p className="text-white text-lg leading-relaxed font-medium">{botGreeting}</p>
                 ) : currentQuestion ? (
@@ -1821,6 +2696,13 @@ export default function InterviewSession() {
                   </div>
                 ) : (
                   <p className="text-gray-400 italic">Preparing your interview...</p>
+                )}
+                
+                {/* Follow-up question indicator */}
+                {followupQuestion && (
+                  <div className="mt-4 p-3 bg-purple-500/20 backdrop-blur-sm rounded-lg border border-purple-500/30">
+                    <p className="text-purple-200 text-sm">Follow-up question available</p>
+                  </div>
                 )}
               </div>
             </div>
@@ -1852,11 +2734,38 @@ export default function InterviewSession() {
                   <span className="text-white text-sm font-bold">Recording</span>
                 </div>
               )}
-              {/* Candidate Label - Enhanced */}
+              {/* Candidate Label - Enhanced with Phase 2 speaking indicator */}
               <div className="absolute bottom-4 left-4 flex items-center space-x-2 bg-gradient-to-r from-gray-900/90 to-gray-800/90 backdrop-blur-md px-4 py-2 rounded-xl border border-gray-700 shadow-lg">
-                <div className="w-2.5 h-2.5 bg-green-400 rounded-full animate-pulse ring-2 ring-green-500/50"></div>
-                <span className="text-white text-sm font-bold">You</span>
+                {candidateSpeaking ? (
+                  <>
+                    <div className="flex space-x-1">
+                      <div className="w-2 h-2 bg-green-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                      <div className="w-2 h-2 bg-green-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                      <div className="w-2 h-2 bg-green-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                    </div>
+                    <span className="text-white text-sm font-bold">You (Speaking)</span>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-2.5 h-2.5 bg-green-400 rounded-full animate-pulse ring-2 ring-green-500/50"></div>
+                    <span className="text-white text-sm font-bold">You</span>
+                  </>
+                )}
               </div>
+              {/* Phase 2: Audio energy visualization (optional, can be hidden) */}
+              {audioEnergy > 0 && candidateSpeaking && (
+                <div className="absolute top-4 left-4 bg-black/50 backdrop-blur-sm px-3 py-1 rounded-lg">
+                  <div className="flex items-center space-x-2">
+                    <div className="w-16 h-2 bg-gray-700 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-gradient-to-r from-green-400 to-emerald-500 transition-all duration-100"
+                        style={{ width: `${Math.min(100, audioEnergy * 1000)}%` }}
+                      ></div>
+                    </div>
+                    <span className="text-xs text-white font-mono">{Math.round(audioEnergy * 1000)}</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Real-time Transcript - Enhanced */}
@@ -1868,11 +2777,29 @@ export default function InterviewSession() {
                   </div>
                   <h4 className="text-sm font-bold text-gray-300 uppercase tracking-wide">Your Response</h4>
                 </div>
-                {isListening && !isProcessing && (
+                {/* Phase 2: Enhanced listening/speaking indicators */}
+                {candidateSpeaking && (
+                  <div className="flex items-center space-x-2 text-green-300 bg-gradient-to-r from-green-500/20 to-emerald-500/20 backdrop-blur-sm px-4 py-2 rounded-xl border border-green-500/30">
+                    <Mic className="w-4 h-4" />
+                    <div className="flex space-x-1">
+                      <div className="w-2 h-2 bg-green-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                      <div className="w-2 h-2 bg-green-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                      <div className="w-2 h-2 bg-green-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                    </div>
+                    <span className="text-sm font-bold">Speaking...</span>
+                  </div>
+                )}
+                {isListening && !isProcessing && !candidateSpeaking && (
                   <div className="flex items-center space-x-2 text-green-300 bg-gradient-to-r from-green-500/20 to-emerald-500/20 backdrop-blur-sm px-4 py-2 rounded-xl border border-green-500/30">
                     <Mic className="w-4 h-4" />
                     <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
                     <span className="text-sm font-bold">Listening...</span>
+                  </div>
+                )}
+                {conversationState === 'candidate_speaking' && !candidateSpeaking && (
+                  <div className="flex items-center space-x-2 text-blue-300 bg-gradient-to-r from-blue-500/20 to-indigo-500/20 backdrop-blur-sm px-4 py-2 rounded-xl border border-blue-500/30">
+                    <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                    <span className="text-sm font-bold">Processing...</span>
                   </div>
                 )}
               </div>
@@ -1892,7 +2819,7 @@ export default function InterviewSession() {
               )}
             </div>
 
-            {/* Start/Stop Answer Buttons - Enhanced */}
+            {/* Start Answer Button - Only shown when not recording (conversational mode handles stopping automatically) */}
             {canStartAnswer && !isRecording && !isSpeaking && (
               <div className="flex justify-center">
                 <button
@@ -1904,15 +2831,13 @@ export default function InterviewSession() {
                 </button>
               </div>
             )}
+            {/* Recording indicator - conversational mode, no manual stop needed */}
             {isRecording && (
               <div className="flex justify-center">
-                <button
-                  onClick={stopAnswering}
-                  className="w-full px-6 py-4 bg-gradient-to-r from-red-600 via-red-600 to-red-500 hover:from-red-700 hover:via-red-700 hover:to-red-600 text-white rounded-2xl font-bold transition-all duration-200 flex items-center justify-center space-x-3 shadow-2xl hover:shadow-red-500/50 transform hover:scale-[1.02] border-2 border-red-500/30"
-                >
-                  <MicOff className="w-6 h-6" />
-                  <span className="text-lg">Stop Answer</span>
-                </button>
+                <div className="w-full px-6 py-4 bg-gradient-to-r from-blue-600 via-blue-600 to-blue-500 text-white rounded-2xl font-bold flex items-center justify-center space-x-3 border-2 border-blue-500/30">
+                  <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                  <span className="text-lg">Recording Answer...</span>
+                </div>
               </div>
             )}
           </div>

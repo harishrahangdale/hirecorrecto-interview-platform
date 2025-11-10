@@ -10,6 +10,8 @@ import CreateInterview from './pages/CreateInterview'
 import InterviewDetails from './pages/InterviewDetails'
 import InterviewSession from './pages/InterviewSession'
 import InterviewResults from './pages/InterviewResults'
+import OverallMetrics from './pages/OverallMetrics'
+import InterviewResultsSummary from './pages/InterviewResultsSummary'
 import LoadingSpinner from './components/LoadingSpinner'
 
 function ProtectedRoute({ children, allowedRoles }) {
@@ -69,6 +71,18 @@ function AppRoutes() {
       <Route path="/interview/:id/results" element={
         <ProtectedRoute allowedRoles={['recruiter']}>
           <InterviewResults />
+        </ProtectedRoute>
+      } />
+      
+      <Route path="/interview/:id/summary" element={
+        <ProtectedRoute allowedRoles={['recruiter']}>
+          <InterviewResultsSummary />
+        </ProtectedRoute>
+      } />
+      
+      <Route path="/reports/overall" element={
+        <ProtectedRoute allowedRoles={['recruiter']}>
+          <OverallMetrics />
         </ProtectedRoute>
       } />
       

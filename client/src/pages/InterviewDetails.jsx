@@ -558,11 +558,19 @@ export default function InterviewDetails() {
                 {interview.status === 'completed' && (
                   <div className="border-t-2 border-gray-200 pt-6 space-y-3 mt-6">
                     <Link
+                      to={`/interview/${interview._id || interview.id || id}/summary`}
+                      className="w-full bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white font-semibold py-3 px-4 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all flex items-center justify-center space-x-2"
+                    >
+                      <BarChart3 className="h-5 w-5" />
+                      <span>View Interview Summary (All Candidates)</span>
+                      <ExternalLink className="h-4 w-4" />
+                    </Link>
+                    <Link
                       to={`/interview/${interview._id || interview.id || id}/results`}
                       className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white font-semibold py-3 px-4 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all flex items-center justify-center space-x-2"
                     >
                       <BarChart3 className="h-5 w-5" />
-                      <span>View Detailed Results</span>
+                      <span>View Candidate Results</span>
                       <ExternalLink className="h-4 w-4" />
                     </Link>
                     

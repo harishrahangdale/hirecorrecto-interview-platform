@@ -108,7 +108,17 @@ export const uploadAPI = {
   getUploadUrl: (interviewId, questionId) => api.get(`/upload/url/${interviewId}/${questionId}`),
   uploadVideo: (interviewId, questionId, file, isFullSession = false) => {
     const formData = new FormData()
-    formData.append('video', file)
+    // Create a File object with proper name and type if it's a Blob
+    let fileToUpload = file
+    if (file instanceof Blob && !(file instanceof File)) {
+      // Determine filename based on blob type
+      const extension = file.type.includes('webm') ? '.webm' : 
+                       file.type.includes('mp4') ? '.mp4' : 
+                       file.type.includes('avi') ? '.avi' : 
+                       file.type.includes('mov') ? '.mov' : '.webm'
+      fileToUpload = new File([file], `video${extension}`, { type: file.type || 'video/webm' })
+    }
+    formData.append('video', fileToUpload)
     if (isFullSession) {
       formData.append('isFullSession', 'true')
     }
@@ -122,6 +132,16 @@ export const uploadAPI = {
 
 // Reports API
 export const reportsAPI = {
+  // Level 1: Overall metrics across all interviews
+  getOverallMetrics: (startDate, endDate) => {
+    const params = new URLSearchParams();
+    if (startDate) params.append('startDate', startDate);
+    if (endDate) params.append('endDate', endDate);
+    return api.get(`/reports/overall?${params.toString()}`);
+  },
+  // Level 2: Interview-level summary (all candidates for one interview)
+  getInterviewSummary: (id) => api.get(`/reports/interviews/${id}/summary`),
+  // Level 3: Detailed results for one candidate attempt
   getInterviewResults: (id) => api.get(`/reports/interviews/${id}/results`),
   getDashboardMetrics: (params = {}) => api.get('/reports/dashboard', { params }),
   exportCSV: (id) => api.get(`/reports/interviews/${id}/export/csv`, { responseType: 'blob' }),

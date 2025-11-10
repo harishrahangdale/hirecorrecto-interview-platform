@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
+const path = require('path');
 require('dotenv').config({ path: '../.env' });
 
 const authRoutes = require('./routes/auth');
@@ -12,7 +13,7 @@ const interviewRoutes = require('./routes/interviews');
 const uploadRoutes = require('./routes/upload');
 const reportRoutes = require('./routes/reports');
 const { authenticateToken } = require('./middleware/auth');
-const { initializeGemini, generateFirstQuestion, generateNextQuestion, processGeminiAudio, geminiService, getSessionSummary, calculateCost } = require('./services/gemini');
+const { initializeGemini, generateFirstQuestion, generateNextQuestion, processGeminiAudio, geminiService, getSessionSummary, calculateCost, processTranscriptChunk, detectQuestionIntent, detectResponseIntent, generateRealTimeAcknowledgment } = require('./services/gemini');
 const Interview = require('./models/Interview');
 
 const app = express();
@@ -60,7 +61,8 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Static file serving for uploads
-app.use('/uploads', express.static('uploads'));
+// Use path.join to ensure correct path resolution from server directory
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -125,6 +127,9 @@ app.post('/api/test-email', async (req, res) => {
     });
   }
 });
+
+// Conversation state tracking for silence detection and interventions
+const conversationStates = new Map(); // sessionId -> conversationState
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
@@ -245,6 +250,26 @@ io.on('connection', (socket) => {
       await interview.save();
       console.log('Interview saved successfully');
 
+      // Initialize conversation state for this session
+      conversationStates.set(geminiSession.id, {
+        sessionId: geminiSession.id,
+        interviewId: interviewId,
+        currentQuestion: {
+          id: firstQuestion.id,
+          text: firstQuestion.text
+        },
+        questionStartTime: Date.now(),
+        lastSpeechTime: null, // Will be set when question finishes speaking
+        silenceDuration: 0,
+        interventionLevel: 'none', // 'none' | 'thinking_check' | 'suggest_move_on' | 'force_move'
+        candidateResponse: null, // 'thinking' | 'ready' | 'skip' | null
+        interventionHistory: [],
+        questionAttempts: 0,
+        deflectionHistory: [],
+        transcriptBuffer: '', // Buffer for accumulating transcript chunks
+        lastProcessTime: 0 // Track last transcript processing time
+      });
+
       console.log('Emitting gemini-session-ready event to socket:', socket.id);
       if (socket.connected) {
         socket.emit('gemini-session-ready', { 
@@ -304,10 +329,27 @@ io.on('connection', (socket) => {
           interview.totalTokenUsage.total_tokens = interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
           interview.totalCost += calculateCost(inputTokens, outputTokens, interview.geminiModel);
           
-          // Update question with token usage if it exists
+          // Update question with evaluation, cheating, transcript, and token usage
           const question = interview.questions.find(q => q.id === questionId);
           if (question) {
+            // Save evaluation if provided
+            if (response.evaluation) {
+              question.evaluation = response.evaluation;
+            }
+            // Save cheating analysis if provided
+            if (response.cheating) {
+              question.cheating = response.cheating;
+            }
+            // Save transcript if provided
+            if (response.transcript) {
+              question.transcript = response.transcript;
+            }
+            // Save token usage
             question.token_usage = response.token_usage || question.token_usage || { input_tokens: 0, output_tokens: 0 };
+            // Mark as answered
+            if (!question.answeredAt) {
+              question.answeredAt = new Date();
+            }
           }
           
           await interview.save();
@@ -466,8 +508,724 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Real-time transcript chunk processing for follow-up questions
+  socket.on('transcript-chunk', async (data) => {
+    const { sessionId, questionId, questionText, transcriptChunk, isFinal, timestamp } = data;
+    
+    try {
+      const session = geminiService.getSession(sessionId);
+      if (!session) {
+        console.warn(`Session ${sessionId} not found for transcript chunk`);
+        return;
+      }
+
+      const conversationState = conversationStates.get(sessionId);
+      if (!conversationState) {
+        console.warn(`Conversation state not found for session ${sessionId}`);
+        return;
+      }
+
+      // Update last speech time
+      conversationState.lastSpeechTime = timestamp || Date.now();
+      conversationState.silenceDuration = 0;
+
+      // Buffer transcript chunks
+      conversationState.transcriptBuffer += transcriptChunk + ' ';
+      
+      // Store candidate's transcript as conversation turn (only for final chunks to avoid duplicates)
+      if (isFinal && transcriptChunk.trim().length > 0) {
+        try {
+          const session = geminiService.getSession(sessionId);
+          if (session) {
+            const interview = await Interview.findById(session.interviewId);
+            if (interview) {
+              const question = interview.questions.find(q => q.id === questionId);
+              if (question) {
+                if (!question.conversationTurns) {
+                  question.conversationTurns = [];
+                }
+                
+                // Check if this is a continuation of previous candidate turn or new turn
+                const lastTurn = question.conversationTurns[question.conversationTurns.length - 1];
+                if (lastTurn && lastTurn.speaker === 'candidate' && (Date.now() - lastTurn.timestamp) < 5000) {
+                  // Append to last turn (within 5 seconds)
+                  lastTurn.text += ' ' + transcriptChunk.trim();
+                  lastTurn.timestamp = Date.now();
+                } else {
+                  // New turn
+                  question.conversationTurns.push({
+                    turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    speaker: 'candidate',
+                    text: transcriptChunk.trim(),
+                    timestamp: Date.now(),
+                    transcript: transcriptChunk.trim()
+                  });
+                }
+                
+                await interview.save();
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error storing candidate conversation turn:', error);
+          // Don't fail the flow if storing fails
+        }
+      }
+
+      // Check for question intent (interview integrity)
+      if (transcriptChunk.trim().length > 10) {
+        try {
+          const questionIntent = await detectQuestionIntent(transcriptChunk, questionText || '');
+          
+          if (questionIntent.requires_deflection) {
+            // Emit deflection response
+            socket.emit('bot-deflection', {
+              type: questionIntent.intent,
+              message: questionIntent.suggested_bot_response,
+              questionId: questionId,
+              candidateQuestion: transcriptChunk,
+              confidence: questionIntent.confidence
+            });
+            
+            // Store bot deflection as conversation turn
+            try {
+              const session = geminiService.getSession(sessionId);
+              if (session) {
+                const interview = await Interview.findById(session.interviewId);
+                if (interview) {
+                  const question = interview.questions.find(q => q.id === questionId);
+                  if (question) {
+                    if (!question.conversationTurns) {
+                      question.conversationTurns = [];
+                    }
+                    question.conversationTurns.push({
+                      turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                      speaker: 'bot',
+                      text: questionIntent.suggested_bot_response,
+                      timestamp: Date.now(),
+                      audioUrl: null
+                    });
+                    await interview.save();
+                  }
+                }
+              }
+            } catch (error) {
+              console.error('Error storing bot deflection turn:', error);
+            }
+
+            // Log deflection
+            conversationState.deflectionHistory.push({
+              timestamp: Date.now(),
+              type: questionIntent.intent,
+              candidateQuestion: transcriptChunk,
+              botResponse: questionIntent.suggested_bot_response,
+              intent: questionIntent
+            });
+            conversationState.questionAttempts++;
+
+            // Update interview with integrity data (async, don't block)
+            const interview = await Interview.findById(session.interviewId);
+            if (interview) {
+              const question = interview.questions.find(q => q.id === questionId);
+              if (question) {
+                if (!question.integrity) {
+                  question.integrity = {
+                    questionAttempts: 0,
+                    deflectionHistory: [],
+                    severity: 'low',
+                    legitimateClarifications: 0
+                  };
+                }
+                question.integrity.questionAttempts++;
+                question.integrity.deflectionHistory.push({
+                  timestamp: Date.now(),
+                  type: questionIntent.intent,
+                  candidateQuestion: transcriptChunk,
+                  botResponse: questionIntent.suggested_bot_response,
+                  intent: {
+                    detected: questionIntent.intent,
+                    confidence: questionIntent.confidence
+                  }
+                });
+                await interview.save();
+              }
+            }
+          } else if (questionIntent.intent === 'legitimate_clarification' && questionIntent.can_clarify) {
+            // Handle legitimate clarification
+            socket.emit('bot-clarification', {
+              message: questionIntent.suggested_bot_response,
+              questionId: questionId
+            });
+            
+            // Store bot clarification as conversation turn
+            try {
+              const session = geminiService.getSession(sessionId);
+              if (session) {
+                const interview = await Interview.findById(session.interviewId);
+                if (interview) {
+                  const question = interview.questions.find(q => q.id === questionId);
+                  if (question) {
+                    if (!question.conversationTurns) {
+                      question.conversationTurns = [];
+                    }
+                    question.conversationTurns.push({
+                      turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                      speaker: 'bot',
+                      text: questionIntent.suggested_bot_response,
+                      timestamp: Date.now(),
+                      audioUrl: null
+                    });
+                    await interview.save();
+                  }
+                }
+              }
+            } catch (error) {
+              console.error('Error storing bot clarification turn:', error);
+            }
+
+            if (conversationState) {
+              if (!conversationState.deflectionHistory) {
+                conversationState.deflectionHistory = [];
+              }
+              conversationState.deflectionHistory.push({
+                timestamp: Date.now(),
+                type: 'legitimate_clarification',
+                candidateQuestion: transcriptChunk,
+                botResponse: questionIntent.suggested_bot_response
+              });
+            }
+          }
+        } catch (error) {
+          console.error('Error detecting question intent:', error);
+          // Continue processing even if intent detection fails
+        }
+      }
+
+      // Phase 2: Generate real-time acknowledgment for natural conversation flow
+      // Only for substantial chunks (not every tiny chunk)
+      if (transcriptChunk.trim().length > 30 && isFinal) {
+        try {
+          const acknowledgment = await generateRealTimeAcknowledgment(sessionId, transcriptChunk, questionId);
+          if (acknowledgment && acknowledgment.should_acknowledge && acknowledgment.acknowledgment) {
+            // Emit acknowledgment to client (but don't speak it immediately - let it be subtle)
+            socket.emit('bot-acknowledgment', {
+              message: acknowledgment.acknowledgment,
+              questionId: questionId,
+              type: 'realtime',
+              confidence: acknowledgment.confidence
+            });
+          }
+        } catch (error) {
+          console.error('Error generating real-time acknowledgment:', error);
+          // Don't fail the flow if acknowledgment fails
+        }
+      }
+
+      // Process transcript chunk for follow-up questions (only if substantial content)
+      // Only process every 3-4 seconds to avoid too many API calls
+      const now = Date.now();
+      const lastProcessTime = conversationState.lastProcessTime || 0;
+      const shouldProcess = isFinal || (now - lastProcessTime > 3000 && conversationState.transcriptBuffer.trim().length > 50);
+
+      if (shouldProcess && conversationState.transcriptBuffer.trim().length > 20) {
+        conversationState.lastProcessTime = now;
+        
+        try {
+          const analysis = await processTranscriptChunk(sessionId, conversationState.transcriptBuffer.trim(), questionId, questionText);
+          
+          // Update session token usage
+          const interview = await Interview.findById(session.interviewId);
+          if (interview) {
+            const inputTokens = analysis.token_usage?.input_tokens || 0;
+            const outputTokens = analysis.token_usage?.output_tokens || 0;
+            interview.totalTokenUsage.input_tokens += inputTokens;
+            interview.totalTokenUsage.output_tokens += outputTokens;
+            interview.totalTokenUsage.total_tokens = interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
+            interview.totalCost += calculateCost(inputTokens, outputTokens, analysis.model || 'gemini-1.5-flash');
+            await interview.save();
+          }
+
+          // If should ask follow-up, emit it
+          if (analysis.should_ask_followup && analysis.followup_question) {
+            socket.emit('followup-question-ready', {
+              questionId: questionId,
+              followupQuestion: {
+                id: `${questionId}_followup_${Date.now()}`,
+                text: analysis.followup_question,
+                type: 'followup',
+                parentQuestionId: questionId
+              },
+              confidence: analysis.confidence,
+              reasoning: analysis.reasoning
+            });
+          }
+        } catch (error) {
+          console.error('Error processing transcript chunk:', error);
+          // Don't emit error to client for transcript processing failures
+        }
+      }
+    } catch (error) {
+      console.error('Error handling transcript chunk:', error);
+      // Don't emit error to client - transcript processing is non-critical
+    }
+  });
+
+  // Silence detection and intervention
+  socket.on('silence-detected', async (data) => {
+    const { sessionId, questionId, silenceDuration, interventionLevel } = data;
+    
+    try {
+      const conversationState = conversationStates.get(sessionId);
+      if (!conversationState) {
+        return;
+      }
+
+      conversationState.silenceDuration = silenceDuration;
+
+      // Determine intervention type based on duration
+      let interventionType = 'none';
+      let response = '';
+      const thinkingCheckResponses = [
+        "Are you still thinking about this? Take your time.",
+        "No rush, are you still working through this?",
+        "I see you're thinking. Would you like more time?",
+        "Feel free to take a moment. Are you still considering your answer?"
+      ];
+      const suggestMoveOnResponses = [
+        "That's perfectly fine. We can move on to the next question if you'd like.",
+        "No worries at all. Would you like to move forward?",
+        "It's okay if you're not sure. We can continue with the next question.",
+        "That's alright. Shall we move on?"
+      ];
+      const forceMoveResponses = [
+        "Let's move on to the next question.",
+        "We'll continue with the next question.",
+        "Moving forward to the next question."
+      ];
+
+      if (silenceDuration >= 7000 && silenceDuration < 15000 && conversationState.interventionLevel === 'none') {
+        interventionType = 'thinking_check';
+        response = thinkingCheckResponses[Math.floor(Math.random() * thinkingCheckResponses.length)];
+        conversationState.interventionLevel = 'thinking_check';
+        conversationState.interventionHistory.push({
+          timestamp: Date.now(),
+          type: 'thinking_check',
+          botMessage: response,
+          candidateResponse: null
+        });
+      } else if (silenceDuration >= 15000 && silenceDuration < 30000 && 
+                 conversationState.interventionLevel === 'thinking_check' && 
+                 conversationState.candidateResponse === 'thinking') {
+        interventionType = 'suggest_move_on';
+        response = suggestMoveOnResponses[Math.floor(Math.random() * suggestMoveOnResponses.length)];
+        conversationState.interventionLevel = 'suggest_move_on';
+        conversationState.interventionHistory.push({
+          timestamp: Date.now(),
+          type: 'suggest_move_on',
+          botMessage: response,
+          candidateResponse: null
+        });
+      } else if (silenceDuration >= 30000 && conversationState.interventionLevel !== 'force_move') {
+        // Only process force_move if we haven't already done so (prevent duplicate question generation)
+        interventionType = 'force_move';
+        response = forceMoveResponses[Math.floor(Math.random() * forceMoveResponses.length)];
+        conversationState.interventionLevel = 'force_move';
+        
+        // Move to next question
+        const session = geminiService.getSession(sessionId);
+        if (session) {
+          const interview = await Interview.findById(session.interviewId);
+          if (interview) {
+            // Mark current question as skipped
+            const question = interview.questions.find(q => q.id === questionId);
+            if (question) {
+              question.skipped = true;
+              question.skipReason = 'timeout';
+              question.skippedAt = new Date();
+              if (!question.interventionHistory) {
+                question.interventionHistory = conversationState.interventionHistory;
+              }
+            }
+
+            // Check if we've already generated a next question (prevent duplicates)
+            const hasNextQuestion = interview.questions.some(q => 
+              q.order > (question?.order || interview.questions.length) && 
+              q.id !== questionId
+            );
+            
+            if (!hasNextQuestion && interview.questions.length < interview.maxQuestions) {
+              // Generate next question
+              const answeredQuestions = session.answeredQuestions || [];
+              const lastAnswer = answeredQuestions[answeredQuestions.length - 1] || {};
+              const previousAnswer = {
+                questionText: question?.text || '',
+                transcript: '',
+                evaluation: {},
+                order: interview.questions.length,
+                questionsAsked: interview.questions.length,
+                skillsTargeted: question?.skillsTargeted || [],
+                interviewQuestions: interview.questions
+              };
+
+              const nextQuestion = await generateNextQuestion(sessionId, previousAnswer);
+              
+              // Double-check the question doesn't already exist before adding
+              const questionExists = interview.questions.some(q => q.id === nextQuestion.id);
+              if (!questionExists) {
+                interview.questions.push({
+                  id: nextQuestion.id,
+                  text: nextQuestion.text,
+                  type: nextQuestion.type,
+                  order: nextQuestion.order,
+                  skillsTargeted: nextQuestion.skillsTargeted || [],
+                  token_usage: nextQuestion.token_usage || { input_tokens: 0, output_tokens: 0 }
+                });
+                await interview.save();
+
+                socket.emit('next-question-generated', {
+                  question: {
+                    id: nextQuestion.id,
+                    text: nextQuestion.text,
+                    type: nextQuestion.type,
+                    order: nextQuestion.order
+                  }
+                });
+              } else {
+                console.log('Next question already exists, skipping generation:', nextQuestion.id);
+              }
+            } else if (interview.questions.length >= interview.maxQuestions) {
+              socket.emit('interview-complete', { message: 'Interview completed' });
+            }
+          }
+        }
+      }
+
+      if (interventionType !== 'none') {
+        socket.emit('bot-intervention', {
+          type: interventionType,
+          message: response,
+          questionId: questionId,
+          silenceDuration: silenceDuration
+        });
+        
+        // Store bot intervention as conversation turn
+        try {
+          const session = geminiService.getSession(sessionId);
+          if (session) {
+            const interview = await Interview.findById(session.interviewId);
+            if (interview) {
+              const question = interview.questions.find(q => q.id === questionId);
+              if (question) {
+                if (!question.conversationTurns) {
+                  question.conversationTurns = [];
+                }
+                question.conversationTurns.push({
+                  turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                  speaker: 'bot',
+                  text: response,
+                  timestamp: Date.now(),
+                  audioUrl: null
+                });
+                await interview.save();
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error storing bot intervention turn:', error);
+        }
+      }
+    } catch (error) {
+      console.error('Error handling silence detection:', error);
+    }
+  });
+
+  // Update conversation state when question starts
+  socket.on('question-started', async (data) => {
+    const { sessionId, questionId, questionText } = data;
+    const conversationState = conversationStates.get(sessionId);
+    if (conversationState) {
+      conversationState.currentQuestion = { id: questionId, text: questionText };
+      conversationState.questionStartTime = Date.now();
+      conversationState.interventionLevel = 'none';
+      conversationState.candidateResponse = null;
+      conversationState.transcriptBuffer = ''; // Reset buffer for new question
+      conversationState.lastProcessTime = 0;
+      conversationState.lastSpeechTime = null; // Reset for new question
+      conversationState.candidateSpeaking = false; // Phase 2: Reset VAD state
+      conversationState.botCanRespond = true; // Phase 2: Bot can respond after question
+      
+      // Store bot's question as a conversation turn
+      try {
+        const session = geminiService.getSession(sessionId);
+        if (session) {
+          const interview = await Interview.findById(session.interviewId);
+          if (interview) {
+            const question = interview.questions.find(q => q.id === questionId);
+            if (question) {
+              if (!question.conversationTurns) {
+                question.conversationTurns = [];
+              }
+              
+              // Add bot's question turn
+              question.conversationTurns.push({
+                turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                speaker: 'bot',
+                text: questionText,
+                timestamp: Date.now(),
+                audioUrl: null // Bot uses TTS
+              });
+              
+              await interview.save();
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error storing conversation turn:', error);
+        // Don't fail the flow if storing fails
+      }
+    }
+  });
+
+  // Phase 2: Handle VAD (Voice Activity Detection) events
+  socket.on('vad-detected', async (data) => {
+    const { sessionId, isSpeaking, energy, silenceDuration, speakingDuration, timestamp } = data;
+    
+    try {
+      const conversationState = conversationStates.get(sessionId);
+      if (!conversationState) {
+        return;
+      }
+
+      // Update conversation state with VAD information
+      conversationState.candidateSpeaking = isSpeaking;
+      conversationState.lastVADTime = timestamp || Date.now();
+      
+      if (isSpeaking) {
+        conversationState.candidateSpeakingStartTime = timestamp || Date.now();
+        conversationState.silenceDuration = 0;
+      } else {
+        conversationState.silenceDuration = silenceDuration || 0;
+        conversationState.candidateSpeakingDuration = speakingDuration || 0;
+      }
+
+      // Turn management: If candidate has been speaking for > 30 seconds, bot can interrupt
+      if (isSpeaking && speakingDuration && speakingDuration > 30000) {
+        // Bot can prepare to interrupt (but don't interrupt immediately)
+        // This is handled in the turn management logic
+      }
+
+      // If candidate stopped speaking and silence > 1-2 seconds, bot can respond
+      if (!isSpeaking && silenceDuration && silenceDuration > 1500 && conversationState.botCanRespond) {
+        // Bot can now respond (handled in turn management)
+      }
+    } catch (error) {
+      console.error('Error handling VAD event:', error);
+    }
+  });
+
+  // Phase 2: Handle audio chunks for real-time processing
+  socket.on('audio-chunk', async (data) => {
+    const { sessionId, audioData, sampleRate, timestamp } = data;
+    
+    try {
+      const session = geminiService.getSession(sessionId);
+      if (!session) {
+        return;
+      }
+
+      // For now, we'll just acknowledge receipt
+      // In future, this can be used for real-time audio processing
+      // (e.g., server-side transcription, real-time analysis)
+      
+      // Note: Audio chunks are received but not processed in real-time yet
+      // This is a foundation for future real-time audio processing features
+    } catch (error) {
+      console.error('Error handling audio chunk:', error);
+    }
+  });
+
+  // Handle candidate response to interventions
+  socket.on('candidate-response', async (data) => {
+    const { sessionId, questionId, transcript } = data;
+    
+    try {
+      const conversationState = conversationStates.get(sessionId);
+      if (!conversationState) {
+        return;
+      }
+
+      // Detect response intent
+      const intent = await detectResponseIntent(transcript);
+      conversationState.candidateResponse = intent.intent;
+
+      if (intent.intent === 'thinking') {
+        // Reset silence timer, give more time
+        conversationState.lastSpeechTime = Date.now();
+        conversationState.silenceDuration = 0;
+        
+        // Update intervention history
+        const lastIntervention = conversationState.interventionHistory[conversationState.interventionHistory.length - 1];
+        if (lastIntervention) {
+          lastIntervention.candidateResponse = transcript;
+          lastIntervention.responseTimestamp = Date.now();
+        }
+
+        socket.emit('bot-acknowledgment', {
+          message: "Take your time, I'm here when you're ready.",
+          questionId: questionId
+        });
+        
+        // Store bot acknowledgment as conversation turn
+        try {
+          const session = geminiService.getSession(sessionId);
+          if (session) {
+            const interview = await Interview.findById(session.interviewId);
+            if (interview) {
+              const question = interview.questions.find(q => q.id === questionId);
+              if (question) {
+                if (!question.conversationTurns) {
+                  question.conversationTurns = [];
+                }
+                question.conversationTurns.push({
+                  turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                  speaker: 'bot',
+                  text: "Take your time, I'm here when you're ready.",
+                  timestamp: Date.now(),
+                  audioUrl: null
+                });
+                await interview.save();
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error storing bot acknowledgment turn:', error);
+        }
+      } else if (intent.intent === 'skip') {
+        // Move to next question
+        const session = geminiService.getSession(sessionId);
+        if (session) {
+          const interview = await Interview.findById(session.interviewId);
+          if (interview) {
+            const question = interview.questions.find(q => q.id === questionId);
+            if (question) {
+              question.skipped = true;
+              question.skipReason = 'candidate_requested';
+              question.skippedAt = new Date();
+            }
+
+            // Generate next question
+            const previousAnswer = {
+              questionText: question?.text || '',
+              transcript: '',
+              evaluation: {},
+              order: interview.questions.length,
+              questionsAsked: interview.questions.length,
+              skillsTargeted: question?.skillsTargeted || [],
+              interviewQuestions: interview.questions
+            };
+
+            if (interview.questions.length < interview.maxQuestions) {
+              const nextQuestion = await generateNextQuestion(sessionId, previousAnswer);
+              interview.questions.push({
+                id: nextQuestion.id,
+                text: nextQuestion.text,
+                type: nextQuestion.type,
+                order: nextQuestion.order,
+                skillsTargeted: nextQuestion.skillsTargeted || [],
+                token_usage: nextQuestion.token_usage || { input_tokens: 0, output_tokens: 0 }
+              });
+              await interview.save();
+
+              socket.emit('next-question-generated', {
+                question: {
+                  id: nextQuestion.id,
+                  text: nextQuestion.text,
+                  type: nextQuestion.type,
+                  order: nextQuestion.order
+                }
+              });
+            } else {
+              socket.emit('interview-complete', { message: 'Interview completed' });
+            }
+          }
+        }
+
+        socket.emit('bot-acknowledgment', {
+          message: "No problem at all. Let's move to the next question.",
+          questionId: questionId
+        });
+        
+        // Store bot acknowledgment as conversation turn
+        try {
+          const session = geminiService.getSession(sessionId);
+          if (session) {
+            const interview = await Interview.findById(session.interviewId);
+            if (interview) {
+              const question = interview.questions.find(q => q.id === questionId);
+              if (question) {
+                if (!question.conversationTurns) {
+                  question.conversationTurns = [];
+                }
+                question.conversationTurns.push({
+                  turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                  speaker: 'bot',
+                  text: "No problem at all. Let's move to the next question.",
+                  timestamp: Date.now(),
+                  audioUrl: null
+                });
+                await interview.save();
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error storing bot acknowledgment turn:', error);
+        }
+      } else if (intent.intent === 'answering') {
+        // Candidate started answering - cancel any pending interventions
+        conversationState.candidateResponse = 'ready';
+        conversationState.interventionLevel = 'none';
+        conversationState.lastSpeechTime = Date.now();
+        conversationState.silenceDuration = 0;
+
+        socket.emit('bot-acknowledgment', {
+          message: "Go ahead, I'm listening.",
+          questionId: questionId
+        });
+        
+        // Store bot acknowledgment as conversation turn
+        try {
+          const session = geminiService.getSession(sessionId);
+          if (session) {
+            const interview = await Interview.findById(session.interviewId);
+            if (interview) {
+              const question = interview.questions.find(q => q.id === questionId);
+              if (question) {
+                if (!question.conversationTurns) {
+                  question.conversationTurns = [];
+                }
+                question.conversationTurns.push({
+                  turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                  speaker: 'bot',
+                  text: "Go ahead, I'm listening.",
+                  timestamp: Date.now(),
+                  audioUrl: null
+                });
+                await interview.save();
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error storing bot acknowledgment turn:', error);
+        }
+      }
+    } catch (error) {
+      console.error('Error handling candidate response:', error);
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
+    // Clean up conversation states (optional - can keep for session duration)
   });
 });
 

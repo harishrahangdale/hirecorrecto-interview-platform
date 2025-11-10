@@ -83,6 +83,109 @@ const questionSchema = new mongoose.Schema({
   },
   answeredAt: {
     type: Date
+  },
+  // Phase 1: Real-time conversation features
+  conversationTurns: [{
+    turnId: {
+      type: String,
+      required: true
+    },
+    speaker: {
+      type: String,
+      enum: ['bot', 'candidate'],
+      required: true
+    },
+    text: {
+      type: String,
+      required: true
+    },
+    timestamp: {
+      type: Number,
+      required: true
+    },
+    audioUrl: {
+      type: String
+    },
+    transcript: {
+      type: String
+    }
+  }],
+  interventionHistory: [{
+    timestamp: {
+      type: Number,
+      required: true
+    },
+    type: {
+      type: String,
+      enum: ['thinking_check', 'suggest_move_on', 'force_move'],
+      required: true
+    },
+    botMessage: {
+      type: String,
+      required: true
+    },
+    candidateResponse: {
+      type: String
+    },
+    responseTimestamp: {
+      type: Number
+    }
+  }],
+  integrity: {
+    questionAttempts: {
+      type: Number,
+      default: 0
+    },
+    deflectionHistory: [{
+      timestamp: {
+        type: Number,
+        required: true
+      },
+      type: {
+        type: String,
+        enum: ['asking_question', 'requesting_answer', 'role_reversal', 'legitimate_clarification'],
+        required: true
+      },
+      candidateQuestion: {
+        type: String,
+        required: true
+      },
+      botResponse: {
+        type: String,
+        required: true
+      },
+      intent: {
+        detected: {
+          type: String
+        },
+        confidence: {
+          type: Number,
+          min: 0,
+          max: 1
+        }
+      }
+    }],
+    severity: {
+      type: String,
+      enum: ['low', 'medium', 'high'],
+      default: 'low'
+    },
+    legitimateClarifications: {
+      type: Number,
+      default: 0
+    }
+  },
+  skipped: {
+    type: Boolean,
+    default: false
+  },
+  skipReason: {
+    type: String,
+    enum: ['candidate_requested', 'timeout', 'max_silence', null],
+    default: null
+  },
+  skippedAt: {
+    type: Date
   }
 });
 
