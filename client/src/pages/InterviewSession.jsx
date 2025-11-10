@@ -687,6 +687,17 @@ export default function InterviewSession() {
             // Speak the follow-up question
             try {
               await speakQuestion(followupQ)
+              
+              // Phase 3: Notify server that follow-up question was asked
+              if (socket && geminiSession) {
+                socket.emit('followup-asked', {
+                  sessionId: geminiSession,
+                  questionId: followupQ.id,
+                  followupQuestionText: followupQ.text,
+                  parentQuestionId: data.questionId
+                })
+              }
+              
               setCanStartAnswer(true)
             } catch (error) {
               console.error('Error speaking follow-up question:', error)

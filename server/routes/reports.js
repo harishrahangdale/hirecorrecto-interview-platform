@@ -216,6 +216,10 @@ router.get('/interviews/:id/results', requireRole(['recruiter']), async (req, re
           skillsTargeted: q.skillsTargeted || [],
           videoUrl: q.videoUrl,
           transcript: q.transcript,
+          // Phase 3: Include conversation data
+          finalTranscript: q.finalTranscript || q.transcript, // Fallback to transcript if finalTranscript not available
+          conversationTurns: q.conversationTurns || [],
+          videoSegment: q.videoSegment || null,
           evaluation: q.evaluation,
           cheating: q.cheating,
           token_usage: q.token_usage,
@@ -410,6 +414,10 @@ router.get('/interviews/:id/export/json', requireRole(['recruiter']), async (req
           skillsTargeted: q.skillsTargeted || [],
           videoUrl: q.videoUrl,
           transcript: q.transcript,
+          // Phase 3: Include conversation data
+          finalTranscript: q.finalTranscript || q.transcript, // Fallback to transcript if finalTranscript not available
+          conversationTurns: q.conversationTurns || [],
+          videoSegment: q.videoSegment || null,
           evaluation: q.evaluation,
           cheating: q.cheating,
           token_usage: q.token_usage,
@@ -732,6 +740,9 @@ function generateCSV(interview) {
     'Skills Targeted',
     'Video URL',
     'Transcript',
+    'Final Transcript (Conversation Format)', // Phase 3
+    'Video Segment Start Time (ms)', // Phase 3
+    'Video Segment End Time (ms)', // Phase 3
     'Relevance Score',
     'Technical Accuracy Score',
     'Fluency Score',
@@ -755,6 +766,9 @@ function generateCSV(interview) {
     `"${(q.skillsTargeted || []).join('; ')}"`,
     q.videoUrl || '',
     `"${(q.transcript || '').replace(/"/g, '""')}"`,
+    `"${((q.finalTranscript || q.transcript || '').replace(/"/g, '""'))}"`, // Phase 3: Final transcript
+    q.videoSegment?.startTime || '', // Phase 3: Video segment start
+    q.videoSegment?.endTime || '', // Phase 3: Video segment end
     q.evaluation?.relevance || '',
     q.evaluation?.technical_accuracy || '',
     q.evaluation?.fluency || '',

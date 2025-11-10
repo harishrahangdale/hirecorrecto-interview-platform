@@ -350,6 +350,22 @@ io.on('connection', (socket) => {
             if (!question.answeredAt) {
               question.answeredAt = new Date();
             }
+            
+            // Phase 3: Track video segment end time and aggregate transcript
+            const now = Date.now();
+            const sessionStartTime = interview.startedAt ? interview.startedAt.getTime() : now;
+            if (!question.videoSegment) {
+              question.videoSegment = {};
+            }
+            question.videoSegment.endTime = now - sessionStartTime; // Relative to session start
+            
+            // Phase 3: Aggregate final transcript from conversation turns
+            if (question.conversationTurns && question.conversationTurns.length > 0) {
+              question.aggregateTranscript();
+            } else {
+              // Fallback to regular transcript if no conversation turns
+              question.finalTranscript = question.transcript || '';
+            }
           }
           
           await interview.save();
@@ -742,15 +758,47 @@ io.on('connection', (socket) => {
             interview.totalTokenUsage.output_tokens += outputTokens;
             interview.totalTokenUsage.total_tokens = interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
             interview.totalCost += calculateCost(inputTokens, outputTokens, analysis.model || 'gemini-1.5-flash');
+            
+            // Phase 3: Store candidate transcript chunk as conversation turn
+            const question = interview.questions.find(q => q.id === questionId);
+            if (question) {
+              if (!question.conversationTurns) {
+                question.conversationTurns = [];
+              }
+              
+              // Check if we already have a recent candidate turn (within last 2 seconds)
+              // If so, update it instead of creating a new one
+              const recentCandidateTurn = question.conversationTurns
+                .filter(t => t.speaker === 'candidate')
+                .sort((a, b) => b.timestamp - a.timestamp)[0];
+              
+              if (recentCandidateTurn && (now - recentCandidateTurn.timestamp) < 2000) {
+                // Update existing turn with accumulated transcript
+                recentCandidateTurn.text = conversationState.transcriptBuffer.trim();
+                recentCandidateTurn.transcript = conversationState.transcriptBuffer.trim();
+                recentCandidateTurn.timestamp = now;
+              } else {
+                // Create new candidate turn
+                question.conversationTurns.push({
+                  turnId: `turn_${now}_${Math.random().toString(36).substr(2, 9)}`,
+                  speaker: 'candidate',
+                  text: conversationState.transcriptBuffer.trim(),
+                  transcript: conversationState.transcriptBuffer.trim(),
+                  timestamp: now
+                });
+              }
+            }
+            
             await interview.save();
           }
 
           // If should ask follow-up, emit it
           if (analysis.should_ask_followup && analysis.followup_question) {
+            const followupQuestionId = `${questionId}_followup_${Date.now()}`;
             socket.emit('followup-question-ready', {
               questionId: questionId,
               followupQuestion: {
-                id: `${questionId}_followup_${Date.now()}`,
+                id: followupQuestionId,
                 text: analysis.followup_question,
                 type: 'followup',
                 parentQuestionId: questionId
@@ -758,6 +806,9 @@ io.on('connection', (socket) => {
               confidence: analysis.confidence,
               reasoning: analysis.reasoning
             });
+            
+            // Phase 3: Store follow-up question as conversation turn when it's ready
+            // Note: This will be stored when the bot actually asks it (via followup-asked event)
           }
         } catch (error) {
           console.error('Error processing transcript chunk:', error);
@@ -908,7 +959,7 @@ io.on('connection', (socket) => {
           silenceDuration: silenceDuration
         });
         
-        // Store bot intervention as conversation turn
+        // Phase 3: Store bot intervention as conversation turn
         try {
           const session = geminiService.getSession(sessionId);
           if (session) {
@@ -954,7 +1005,7 @@ io.on('connection', (socket) => {
       conversationState.candidateSpeaking = false; // Phase 2: Reset VAD state
       conversationState.botCanRespond = true; // Phase 2: Bot can respond after question
       
-      // Store bot's question as a conversation turn
+      // Phase 3: Store bot's question as a conversation turn and track video segment start
       try {
         const session = geminiService.getSession(sessionId);
         if (session) {
@@ -966,14 +1017,23 @@ io.on('connection', (socket) => {
                 question.conversationTurns = [];
               }
               
+              const now = Date.now();
+              const sessionStartTime = interview.startedAt ? interview.startedAt.getTime() : now;
+              
               // Add bot's question turn
               question.conversationTurns.push({
-                turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                turnId: `turn_${now}_${Math.random().toString(36).substr(2, 9)}`,
                 speaker: 'bot',
                 text: questionText,
-                timestamp: Date.now(),
+                timestamp: now,
                 audioUrl: null // Bot uses TTS
               });
+              
+              // Phase 3: Track video segment start time
+              if (!question.videoSegment) {
+                question.videoSegment = {};
+              }
+              question.videoSegment.startTime = now - sessionStartTime; // Relative to session start
               
               await interview.save();
             }
@@ -983,6 +1043,39 @@ io.on('connection', (socket) => {
         console.error('Error storing conversation turn:', error);
         // Don't fail the flow if storing fails
       }
+    }
+  });
+
+  // Phase 3: Track when follow-up question is asked
+  socket.on('followup-asked', async (data) => {
+    const { sessionId, questionId, followupQuestionText, parentQuestionId } = data;
+    
+    try {
+      const session = geminiService.getSession(sessionId);
+      if (session) {
+        const interview = await Interview.findById(session.interviewId);
+        if (interview) {
+          // Store follow-up in the parent question's conversation turns
+          const parentQuestion = interview.questions.find(q => q.id === (parentQuestionId || questionId));
+          if (parentQuestion) {
+            if (!parentQuestion.conversationTurns) {
+              parentQuestion.conversationTurns = [];
+            }
+            
+            parentQuestion.conversationTurns.push({
+              turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+              speaker: 'bot',
+              text: followupQuestionText,
+              timestamp: Date.now(),
+              audioUrl: null
+            });
+            
+            await interview.save();
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error storing follow-up question turn:', error);
     }
   });
 

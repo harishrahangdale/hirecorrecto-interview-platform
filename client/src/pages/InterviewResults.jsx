@@ -1146,15 +1146,105 @@ export default function InterviewResults() {
                   </div>
                 )}
 
-                {/* Transcript */}
-                {selectedQuestion.transcript && (
+                {/* Transcript - Phase 3: Show finalTranscript if available, otherwise transcript */}
+                {(selectedQuestion.finalTranscript || selectedQuestion.transcript) && (
                   <div>
                     <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center space-x-2">
                       <FileText className="h-4 w-4" />
-                      <span>Candidate Answer Transcript</span>
+                      <span>
+                        {selectedQuestion.finalTranscript 
+                          ? 'Full Conversation Transcript' 
+                          : 'Candidate Answer Transcript'}
+                      </span>
                     </h4>
                     <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
-                      <p className="text-gray-900 whitespace-pre-wrap">{selectedQuestion.transcript}</p>
+                      <p className="text-gray-900 whitespace-pre-wrap">
+                        {selectedQuestion.finalTranscript || selectedQuestion.transcript}
+                      </p>
+                    </div>
+                    {selectedQuestion.finalTranscript && selectedQuestion.transcript && 
+                     selectedQuestion.finalTranscript !== selectedQuestion.transcript && (
+                      <p className="text-xs text-gray-500 mt-2 italic">
+                        Note: This is the full conversation including bot questions and follow-ups. 
+                        The original candidate-only transcript is also available below.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Phase 3: Conversation Turns (if available and different from finalTranscript) */}
+                {selectedQuestion.conversationTurns && selectedQuestion.conversationTurns.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center space-x-2">
+                      <Clock className="h-4 w-4" />
+                      <span>Conversation Timeline</span>
+                    </h4>
+                    <div className="space-y-3">
+                      {selectedQuestion.conversationTurns
+                        .sort((a, b) => a.timestamp - b.timestamp)
+                        .map((turn, idx) => (
+                          <div 
+                            key={turn.turnId || idx}
+                            className={`p-3 rounded-lg border ${
+                              turn.speaker === 'bot' 
+                                ? 'bg-blue-50 border-blue-200' 
+                                : 'bg-green-50 border-green-200'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between mb-1">
+                              <span className={`text-xs font-semibold ${
+                                turn.speaker === 'bot' ? 'text-blue-700' : 'text-green-700'
+                              }`}>
+                                {turn.speaker === 'bot' ? '🤖 Bot' : '👤 Candidate'}
+                              </span>
+                              <span className="text-xs text-gray-500">
+                                {new Date(turn.timestamp).toLocaleTimeString()}
+                              </span>
+                            </div>
+                            <p className="text-sm text-gray-900 whitespace-pre-wrap">
+                              {turn.text || turn.transcript || ''}
+                            </p>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Phase 3: Video Segment Information */}
+                {selectedQuestion.videoSegment && (
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center space-x-2">
+                      <Video className="h-4 w-4" />
+                      <span>Video Segment</span>
+                    </h4>
+                    <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        {selectedQuestion.videoSegment.startTime !== undefined && (
+                          <div>
+                            <span className="text-gray-600">Start Time:</span>
+                            <span className="ml-2 font-medium text-gray-900">
+                              {Math.round(selectedQuestion.videoSegment.startTime / 1000)}s
+                            </span>
+                          </div>
+                        )}
+                        {selectedQuestion.videoSegment.endTime !== undefined && (
+                          <div>
+                            <span className="text-gray-600">End Time:</span>
+                            <span className="ml-2 font-medium text-gray-900">
+                              {Math.round(selectedQuestion.videoSegment.endTime / 1000)}s
+                            </span>
+                          </div>
+                        )}
+                        {selectedQuestion.videoSegment.startTime !== undefined && 
+                         selectedQuestion.videoSegment.endTime !== undefined && (
+                          <div className="col-span-2">
+                            <span className="text-gray-600">Duration:</span>
+                            <span className="ml-2 font-medium text-gray-900">
+                              {Math.round((selectedQuestion.videoSegment.endTime - selectedQuestion.videoSegment.startTime) / 1000)}s
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}

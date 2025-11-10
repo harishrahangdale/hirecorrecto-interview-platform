@@ -25,8 +25,24 @@ const questionSchema = new mongoose.Schema({
   videoUrl: {
     type: String
   },
+  // Phase 3: Video segment tracking
+  videoSegment: {
+    startTime: {
+      type: Number // Timestamp relative to session start
+    },
+    endTime: {
+      type: Number // Timestamp relative to session start
+    },
+    videoUrl: {
+      type: String // URL to question-specific video segment (if extracted)
+    }
+  },
   transcript: {
     type: String
+  },
+  // Phase 3: Final aggregated transcript in conversation format
+  finalTranscript: {
+    type: String // Combined transcript with bot and candidate turns
   },
   evaluation: {
     relevance: {
@@ -472,6 +488,37 @@ interviewSchema.methods.calculateTokenUsage = function() {
     output_tokens: totalOutput,
     total_tokens: totalTokens
   };
+};
+
+// Phase 3: Aggregate transcript from conversation turns
+questionSchema.methods.aggregateTranscript = function() {
+  if (!this.conversationTurns || this.conversationTurns.length === 0) {
+    // Fallback to regular transcript if no conversation turns
+    this.finalTranscript = this.transcript || '';
+    return this.finalTranscript;
+  }
+
+  // Sort turns by timestamp
+  const sortedTurns = [...this.conversationTurns].sort((a, b) => a.timestamp - b.timestamp);
+  
+  // Format as conversation transcript
+  const conversationLines = sortedTurns.map(turn => {
+    const speaker = turn.speaker === 'bot' ? '[Bot]' : '[Candidate]';
+    const text = turn.text || turn.transcript || '';
+    return `${speaker}: ${text}`;
+  });
+
+  this.finalTranscript = conversationLines.join('\n\n');
+  return this.finalTranscript;
+};
+
+// Phase 3: Aggregate transcript for all questions
+interviewSchema.methods.aggregateAllTranscripts = function() {
+  this.questions.forEach(question => {
+    if (question.conversationTurns && question.conversationTurns.length > 0) {
+      question.aggregateTranscript();
+    }
+  });
 };
 
 module.exports = mongoose.model('Interview', interviewSchema);

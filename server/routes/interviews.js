@@ -906,6 +906,22 @@ router.post('/:id/questions/:questionId/answer', requireRole(['candidate']), [
       question.cheating = geminiResponse?.cheating || question.cheating;
       question.token_usage = geminiResponse?.token_usage || question.token_usage;
       question.answeredAt = new Date();
+      
+      // Phase 3: Track video segment end time and aggregate transcript
+      const now = Date.now();
+      const sessionStartTime = interview.startedAt ? interview.startedAt.getTime() : now;
+      if (!question.videoSegment) {
+        question.videoSegment = {};
+      }
+      question.videoSegment.endTime = now - sessionStartTime; // Relative to session start
+      
+      // Phase 3: Aggregate final transcript from conversation turns
+      if (question.conversationTurns && question.conversationTurns.length > 0) {
+        question.aggregateTranscript();
+      } else {
+        // Fallback to regular transcript if no conversation turns
+        question.finalTranscript = question.transcript || '';
+      }
     }
 
     // Update total token usage with actual values
