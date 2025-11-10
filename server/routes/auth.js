@@ -35,7 +35,7 @@ const loginLimiter = rateLimit({
 
 // Register
 router.post('/register', [
-  body('email').isEmail().normalizeEmail(),
+  body('email').isEmail(),
   body('password').isLength({ min: 6 }),
   body('firstName').trim().notEmpty(),
   body('lastName').trim().notEmpty(),
@@ -92,7 +92,7 @@ router.post('/register', [
 
 // Login
 router.post('/login', loginLimiter, [
-  body('email').isEmail().normalizeEmail(),
+  body('email').isEmail(),
   body('password').notEmpty()
 ], async (req, res) => {
   try {
