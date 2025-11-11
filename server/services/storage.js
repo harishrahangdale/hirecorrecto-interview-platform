@@ -109,9 +109,10 @@ class StorageService {
 
   async ensureContainerExists() {
     try {
-      await this.containerClient.createIfNotExists({
-        access: 'private' // Private by default, use SAS URLs for access
-      });
+      // Omit access parameter for private container (default behavior)
+      // Azure Blob Storage only accepts "container" or "blob" for public access
+      // Private containers use SAS URLs for access
+      await this.containerClient.createIfNotExists();
     } catch (error) {
       console.error('Error ensuring Azure container exists:', error);
       // Don't throw - let it be created on first upload if needed

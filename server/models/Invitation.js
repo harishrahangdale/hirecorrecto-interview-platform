@@ -60,7 +60,7 @@ const invitationSchema = new mongoose.Schema({
 
 // Index for faster lookups
 invitationSchema.index({ interviewId: 1, candidateEmail: 1 });
-invitationSchema.index({ inviteToken: 1 });
+// Note: inviteToken index is automatically created by unique: true in schema
 invitationSchema.index({ candidateId: 1 });
 
 // Check if invitation is expired
