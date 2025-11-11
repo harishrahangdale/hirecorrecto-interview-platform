@@ -1686,26 +1686,59 @@ Return JSON:
     // Quick pattern-based check first
     const lowerTranscript = transcript.toLowerCase().trim();
     
-    // Thinking indicators
+    // Continue indicators (wants to keep answering)
+    const continuePatterns = [
+      /^(yes|yeah|yep|sure|okay|ok|continue|more|keep going|go ahead)\b/i,
+      /(want|would like|will) (to )?(continue|keep going|say more|add more|elaborate)/i,
+      /(still|more|another) (point|thing|thought|idea)/i,
+      /(let me|i'll|i will) (continue|keep going|say more|add)/i
+    ];
+
+    // Done indicators (finished with answer)
+    const donePatterns = [
+      /^(no|nope|nah|that's all|that's it|done|finished|complete)\b/i,
+      /(that's|that is) (all|it|everything|complete|done|finished)/i,
+      /(i'm|i am) (done|finished|complete)/i,
+      /(nothing|no more|no further) (to add|to say)/i,
+      /(move on|next question|skip|pass)/i
+    ];
+
+    // Thinking indicators (needs more time to think)
     const thinkingPatterns = [
-      /^(yes|yeah|yep|sure|okay|ok)\b/i,
       /(thinking|moment|time|wait|give me)/i,
       /(need|want|let me) (more )?(time|moment)/i
     ];
 
-    // Skip indicators
+    // Skip indicators (doesn't know, wants to skip)
     const skipPatterns = [
-      /^(no|nope|nah)\b/i,
       /(don't know|dunno|not sure|unsure)/i,
-      /(skip|next|move on|pass)/i,
       /(can't|cannot) (answer|know|think)/i
     ];
 
+    const isContinue = continuePatterns.some(pattern => pattern.test(lowerTranscript));
+    const isDone = donePatterns.some(pattern => pattern.test(lowerTranscript));
     const isThinking = thinkingPatterns.some(pattern => pattern.test(lowerTranscript));
     const isSkip = skipPatterns.some(pattern => pattern.test(lowerTranscript));
 
+    // Priority: continue > done > thinking > skip
+    if (isContinue && !isDone) {
+      return {
+        intent: 'continue',
+        confidence: 0.9,
+        detection_method: 'pattern'
+      };
+    }
+
+    if (isDone) {
+      return {
+        intent: 'done',
+        confidence: 0.9,
+        detection_method: 'pattern'
+      };
+    }
+
     // If clear pattern match, return quickly
-    if (isThinking && !isSkip) {
+    if (isThinking && !isSkip && !isDone) {
       return {
         intent: 'thinking',
         confidence: 0.85,
@@ -1734,19 +1767,20 @@ Return JSON:
           }
         });
 
-        const prompt = `Analyze this candidate response and determine intent:
+        const prompt = `Analyze this candidate response to a check-in question ("Would you like to continue with your answer, or are you done?") and determine intent:
 
 Transcript: "${transcript}"
 
 Determine if the candidate is:
-1. Still thinking (wants more time) - short responses like "yes", "thinking", "give me a moment"
-2. Ready to skip (doesn't know, wants to move on) - responses like "no", "I don't know", "skip"
-3. Starting to answer (has begun their response) - substantial content, technical terms, explanation
-4. Asking for clarification - questions about the question itself
+1. "continue" - wants to keep answering (e.g., "yes", "continue", "I want to say more", "let me add")
+2. "done" - finished with their answer (e.g., "that's all", "done", "no more", "that's it")
+3. "thinking" - still thinking, needs more time (e.g., "thinking", "give me a moment", "wait")
+4. "skip" - doesn't know, wants to skip (e.g., "I don't know", "skip", "can't answer")
+5. "answering" - has started giving a substantial answer (technical content, explanation)
 
 Return JSON:
 {
-  "intent": "thinking" | "skip" | "answering" | "clarification",
+  "intent": "continue" | "done" | "thinking" | "skip" | "answering",
   "confidence": 0.0-1.0,
   "suggested_bot_response": "string (only if intent is thinking or skip)"
 }`;
@@ -1760,7 +1794,7 @@ Return JSON:
           const parsed = JSON.parse(jsonMatch[0]);
           
           // Validate intent
-          const validIntents = ['thinking', 'skip', 'answering', 'clarification'];
+          const validIntents = ['continue', 'done', 'thinking', 'skip', 'answering', 'clarification'];
           if (!validIntents.includes(parsed.intent)) {
             parsed.intent = 'answering'; // Default to safe option
           }

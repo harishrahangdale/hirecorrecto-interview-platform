@@ -219,18 +219,18 @@ export default function InterviewSession() {
         
         // Only emit if we've crossed a threshold AND haven't already emitted for this level
         // This prevents duplicate emissions that cause multiple question jumps
-        if (silenceDuration >= 7000 && silenceDuration < 15000 && !hasIntervened && lastCheckedDuration < 7000 && lastEmittedLevel !== 'thinking_check') {
-          // First intervention: thinking check
+        if (silenceDuration >= 5000 && silenceDuration < 15000 && !hasIntervened && lastCheckedDuration < 5000 && lastEmittedLevel !== 'check_in') {
+          // First intervention: Check-in to see if candidate wants to continue or is done
           socket.emit('silence-detected', {
             sessionId: geminiSession,
             questionId: currentQuestion.id,
             silenceDuration: silenceDuration,
-            interventionLevel: 'thinking_check'
+            interventionLevel: 'check_in'
           })
           hasIntervened = true
-          lastEmittedLevel = 'thinking_check'
+          lastEmittedLevel = 'check_in'
           interventionEmitted = true
-        } else if (silenceDuration >= 15000 && silenceDuration < 30000 && lastCheckedDuration < 15000 && lastEmittedLevel !== 'suggest_move_on') {
+        } else if (silenceDuration >= 15000 && silenceDuration < 30000 && lastCheckedDuration < 15000 && lastEmittedLevel !== 'suggest_move_on' && lastEmittedLevel !== 'check_in') {
           // Second intervention: suggest move on
           socket.emit('silence-detected', {
             sessionId: geminiSession,
@@ -597,9 +597,9 @@ export default function InterviewSession() {
       newSocket.on('bot-deflection', (data) => {
         console.log('Bot deflection:', data)
         setBotDeflection(data)
-        // Speak the deflection message
+        // Speak the deflection message (allow interrupt for deflections)
         if (data.message) {
-          speakText(data.message).catch(err => {
+          speakText(data.message, { allowInterrupt: true }).catch(err => {
             console.error('Error speaking deflection:', err)
           })
         }
@@ -610,9 +610,9 @@ export default function InterviewSession() {
       newSocket.on('bot-intervention', (data) => {
         console.log('Bot intervention:', data)
         setBotIntervention(data)
-        // Speak the intervention message
+        // Speak the intervention message (allow interrupt for interventions - they're important)
         if (data.message) {
-          speakText(data.message).catch(err => {
+          speakText(data.message, { allowInterrupt: true }).catch(err => {
             console.error('Error speaking intervention:', err)
           })
         }
@@ -639,7 +639,7 @@ export default function InterviewSession() {
       
       newSocket.on('bot-clarification', (data) => {
         console.log('Bot clarification:', data)
-        // Speak the clarification
+        // Speak the clarification (wait for natural pause - clarifications aren't urgent)
         if (data.message) {
           speakText(data.message).catch(err => {
             console.error('Error speaking clarification:', err)
@@ -664,47 +664,82 @@ export default function InterviewSession() {
           return prev
         })
         
-        // Ask the follow-up question after a brief pause (if candidate is still speaking, wait)
-        // For now, we'll ask it after 2 seconds to allow candidate to finish current thought
-        setTimeout(async () => {
-          // Only ask if we're still on the same question
-          if (currentQuestion && currentQuestion.id === data.questionId) {
-            setCurrentQuestion(followupQ)
-            currentQuestionIdRef.current = followupQ.id
-            
-            // Reset silence monitoring
-            setLastSpeechTime(null)
-            
-            // Notify server
-            if (socket && geminiSession) {
-              socket.emit('question-started', {
-                sessionId: geminiSession,
-                questionId: followupQ.id,
-                questionText: followupQ.text
-              })
+        // Wait for candidate to finish speaking before asking follow-up
+        const askFollowupWhenReady = async () => {
+          // Check if candidate is speaking
+          if (candidateSpeaking) {
+            console.log('Candidate is speaking, waiting for natural pause before asking follow-up...')
+            // Check again in 500ms
+            setTimeout(askFollowupWhenReady, 500)
+            return
+          }
+          
+          // Wait for a natural pause (1-2 seconds of silence)
+          const checkPause = () => {
+            if (!candidateSpeaking && lastSpeechTime) {
+              const silenceDuration = Date.now() - lastSpeechTime
+              if (silenceDuration >= 1500) {
+                // Natural pause detected, ask follow-up
+                proceedWithFollowup()
+              } else {
+                // Not enough silence yet, check again
+                setTimeout(checkPause, 500)
+              }
+            } else if (!lastSpeechTime) {
+              // No speech time recorded, safe to proceed
+              proceedWithFollowup()
+            } else {
+              // Candidate started speaking again, wait
+              setTimeout(askFollowupWhenReady, 500)
             }
-            
-            // Speak the follow-up question
-            try {
-              await speakQuestion(followupQ)
+          }
+          
+          const proceedWithFollowup = async () => {
+            // Only ask if we're still on the same question
+            if (currentQuestion && currentQuestion.id === data.questionId) {
+              setCurrentQuestion(followupQ)
+              currentQuestionIdRef.current = followupQ.id
               
-              // Phase 3: Notify server that follow-up question was asked
+              // Reset silence monitoring
+              setLastSpeechTime(null)
+              
+              // Notify server
               if (socket && geminiSession) {
-                socket.emit('followup-asked', {
+                socket.emit('question-started', {
                   sessionId: geminiSession,
                   questionId: followupQ.id,
-                  followupQuestionText: followupQ.text,
-                  parentQuestionId: data.questionId
+                  questionText: followupQ.text
                 })
               }
               
-              setCanStartAnswer(true)
-            } catch (error) {
-              console.error('Error speaking follow-up question:', error)
-              setCanStartAnswer(true)
+              // Speak the follow-up question (will wait if candidate is speaking)
+              try {
+                await speakQuestion(followupQ)
+                
+                // Phase 3: Notify server that follow-up question was asked
+                if (socket && geminiSession) {
+                  socket.emit('followup-asked', {
+                    sessionId: geminiSession,
+                    questionId: followupQ.id,
+                    followupQuestionText: followupQ.text,
+                    parentQuestionId: data.questionId
+                  })
+                }
+                
+                setCanStartAnswer(true)
+              } catch (error) {
+                console.error('Error speaking follow-up question:', error)
+                setCanStartAnswer(true)
+              }
             }
           }
-        }, 2000) // Wait 2 seconds before asking follow-up
+          
+          // Start checking for pause
+          setTimeout(checkPause, 1000) // Initial 1 second wait
+        }
+        
+        // Start the process
+        askFollowupWhenReady()
       })
       
       newSocket.on('next-question-generated', (data) => {
@@ -780,6 +815,17 @@ export default function InterviewSession() {
       newSocket.on('interview-complete', (data) => {
         console.log('Interview complete:', data)
         completeInterview()
+      })
+      
+      // Handle server request to process answer (when candidate says they're done)
+      newSocket.on('process-answer-now', (data) => {
+        console.log('Server requested to process answer:', data)
+        // Trigger answer processing
+        if (isAnsweringRef.current && currentQuestion) {
+          stopAnswering().catch(err => {
+            console.error('Error processing answer on server request:', err)
+          })
+        }
       })
       
       // Initialize camera and audio
@@ -1494,7 +1540,7 @@ export default function InterviewSession() {
     }
   }
 
-  const speakText = (text) => {
+  const speakText = (text, options = {}) => {
     return new Promise((resolve, reject) => {
       // Check if speech synthesis is available
       if (!('speechSynthesis' in window)) {
@@ -1509,6 +1555,31 @@ export default function InterviewSession() {
       if (speakingRef.current && currentUtteranceRef.current?.text === text) {
         console.log('Already speaking this text, skipping duplicate')
         resolve()
+        return
+      }
+
+      // IMPORTANT: Wait for candidate to finish speaking before bot speaks
+      // Unless explicitly allowed to interrupt (e.g., urgent interventions)
+      const allowInterrupt = options.allowInterrupt || false
+      if (candidateSpeaking && !allowInterrupt) {
+        console.log('Candidate is speaking, waiting for natural pause...')
+        const waitForPause = () => {
+          if (!candidateSpeaking) {
+            // Candidate stopped speaking, wait a bit more for natural pause
+            setTimeout(() => {
+              if (!candidateSpeaking) {
+                startSpeaking(text, resolve, reject)
+              } else {
+                // Candidate started speaking again, wait more
+                setTimeout(waitForPause, 500)
+              }
+            }, 1000) // Wait 1 second after candidate stops
+          } else {
+            // Still speaking, check again
+            setTimeout(waitForPause, 500)
+          }
+        }
+        waitForPause()
         return
       }
 

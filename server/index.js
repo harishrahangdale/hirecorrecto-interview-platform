@@ -836,11 +836,11 @@ io.on('connection', (socket) => {
       // Determine intervention type based on duration
       let interventionType = 'none';
       let response = '';
-      const thinkingCheckResponses = [
-        "Are you still thinking about this? Take your time.",
-        "No rush, are you still working through this?",
-        "I see you're thinking. Would you like more time?",
-        "Feel free to take a moment. Are you still considering your answer?"
+      const checkInResponses = [
+        "I notice you've paused. Would you like to continue with your answer, or are you done?",
+        "You've been quiet for a moment. Would you like to continue, or have you finished your answer?",
+        "I see you've paused. Are you still working on your answer, or would you like to move on?",
+        "Would you like to continue with your answer, or are you finished?"
       ];
       const suggestMoveOnResponses = [
         "That's perfectly fine. We can move on to the next question if you'd like.",
@@ -854,19 +854,19 @@ io.on('connection', (socket) => {
         "Moving forward to the next question."
       ];
 
-      if (silenceDuration >= 7000 && silenceDuration < 15000 && conversationState.interventionLevel === 'none') {
-        interventionType = 'thinking_check';
-        response = thinkingCheckResponses[Math.floor(Math.random() * thinkingCheckResponses.length)];
-        conversationState.interventionLevel = 'thinking_check';
+      if (silenceDuration >= 5000 && silenceDuration < 15000 && conversationState.interventionLevel === 'none') {
+        interventionType = 'check_in';
+        response = checkInResponses[Math.floor(Math.random() * checkInResponses.length)];
+        conversationState.interventionLevel = 'check_in';
         conversationState.interventionHistory.push({
           timestamp: Date.now(),
-          type: 'thinking_check',
+          type: 'check_in',
           botMessage: response,
           candidateResponse: null
         });
       } else if (silenceDuration >= 15000 && silenceDuration < 30000 && 
-                 conversationState.interventionLevel === 'thinking_check' && 
-                 conversationState.candidateResponse === 'thinking') {
+                 (conversationState.interventionLevel === 'check_in' || conversationState.interventionLevel === 'thinking_check') && 
+                 (conversationState.candidateResponse === 'thinking' || conversationState.candidateResponse === 'continue')) {
         interventionType = 'suggest_move_on';
         response = suggestMoveOnResponses[Math.floor(Math.random() * suggestMoveOnResponses.length)];
         conversationState.interventionLevel = 'suggest_move_on';
@@ -1151,7 +1151,72 @@ io.on('connection', (socket) => {
       const intent = await detectResponseIntent(transcript);
       conversationState.candidateResponse = intent.intent;
 
-      if (intent.intent === 'thinking') {
+      if (intent.intent === 'continue') {
+        // Candidate wants to continue answering - reset silence timer and let them continue
+        conversationState.lastSpeechTime = Date.now();
+        conversationState.silenceDuration = 0;
+        conversationState.interventionLevel = 'none'; // Reset intervention level
+        
+        // Update intervention history
+        const lastIntervention = conversationState.interventionHistory[conversationState.interventionHistory.length - 1];
+        if (lastIntervention) {
+          lastIntervention.candidateResponse = transcript;
+          lastIntervention.responseTimestamp = Date.now();
+          lastIntervention.intent = 'continue';
+        }
+
+        socket.emit('bot-acknowledgment', {
+          message: "Of course, please continue with your answer.",
+          questionId: questionId,
+          type: 'continue_allowed'
+        });
+        
+        // Store bot acknowledgment as conversation turn
+        try {
+          const session = geminiService.getSession(sessionId);
+          if (session) {
+            const interview = await Interview.findById(session.interviewId);
+            if (interview) {
+              const question = interview.questions.find(q => q.id === questionId);
+              if (question) {
+                if (!question.conversationTurns) {
+                  question.conversationTurns = [];
+                }
+                question.conversationTurns.push({
+                  turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                  speaker: 'bot',
+                  text: "Of course, please continue with your answer.",
+                  timestamp: Date.now(),
+                  audioUrl: null
+                });
+                await interview.save();
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error storing bot acknowledgment turn:', error);
+        }
+      } else if (intent.intent === 'done') {
+        // Candidate is done with their answer - process it and move to next question
+        const lastIntervention = conversationState.interventionHistory[conversationState.interventionHistory.length - 1];
+        if (lastIntervention) {
+          lastIntervention.candidateResponse = transcript;
+          lastIntervention.responseTimestamp = Date.now();
+          lastIntervention.intent = 'done';
+        }
+
+        socket.emit('bot-acknowledgment', {
+          message: "Thank you. Let me process your answer and we'll move to the next question.",
+          questionId: questionId,
+          type: 'processing_answer'
+        });
+
+        // Trigger answer processing (this will be handled by the client's handleStopAnswer)
+        socket.emit('process-answer-now', {
+          questionId: questionId,
+          reason: 'candidate_done'
+        });
+      } else if (intent.intent === 'thinking') {
         // Reset silence timer, give more time
         conversationState.lastSpeechTime = Date.now();
         conversationState.silenceDuration = 0;
