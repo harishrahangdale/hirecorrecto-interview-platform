@@ -966,16 +966,18 @@ EVALUATION CRITERIA:
    - "fail": overall_score < ${passPercentage * 0.7}
 
 6. Cheating Detection (0-1):
-   - CRITICAL: The video includes the ENTIRE period from when the question started being spoken until the candidate stopped answering.
-   - This means the video includes:
-     * Question period: When the interviewer was speaking the question
-     * Gap period: The time between when the question finished and when the candidate clicked "Start Answer" (THIS IS CRITICAL FOR CHEATING DETECTION)
-     * Answer period: When the candidate was actively answering
-   - Pay SPECIAL ATTENTION to the gap period (between question end and answer start) as this is when candidates are most likely to cheat:
+   - CRITICAL: The video includes the ENTIRE period from when the question started being spoken until the candidate finished answering.
+   - This is a natural conversational interview flow where:
+     * Question period: When the interviewer (AI bot) was speaking the question
+     * Gap period: The time between when the question finished and when the candidate naturally started speaking (THIS IS CRITICAL FOR CHEATING DETECTION)
+     * Answer period: When the candidate was actively speaking and answering
+   - IMPORTANT: This is a conversational interview - recording starts automatically when the question begins, and the candidate responds naturally without any buttons or manual triggers.
+   - Pay SPECIAL ATTENTION to the gap period (between question end and when candidate starts speaking) as this is when candidates are most likely to cheat:
      * Looking at phones, other devices, or external sources
      * Consulting with other people
      * Reading from notes or screens
      * Any suspicious behavior during this gap
+   - Also monitor for suspicious behavior during natural pauses in the candidate's answer (5+ second pauses where they might be consulting external sources)
    - Analyze ALL visual frames throughout the ENTIRE video for comprehensive detection:
      * Multiple faces or people in frame
      * Absence of candidate's face
@@ -987,8 +989,8 @@ EVALUATION CRITERIA:
    - Consider patterns across multiple frames, not just individual frames
    - Flag any suspicious behavior during the gap period as HIGH PRIORITY
    - 0.0-0.3: Normal behavior, candidate appears engaged throughout
-   - 0.4-0.6: Some concerns, occasional suspicious behavior (especially during gap period)
-   - 0.7-1.0: Strong indicators of cheating, consistent suspicious patterns (especially during gap period)
+   - 0.4-0.6: Some concerns, occasional suspicious behavior (especially during gap period or long pauses)
+   - 0.7-1.0: Strong indicators of cheating, consistent suspicious patterns (especially during gap period or long pauses)
 ${timestamps ? `\nTIMESTAMP INFORMATION (for reference):
    - Question started at: ${new Date(timestamps.questionStartTime).toISOString()}
    - Question ended at: ${new Date(timestamps.questionEndTime).toISOString()}
