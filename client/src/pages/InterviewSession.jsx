@@ -27,7 +27,7 @@ export default function InterviewSession() {
   const [isListening, setIsListening] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [showEndConfirm, setShowEndConfirm] = useState(false)
-  const [canStartAnswer, setCanStartAnswer] = useState(false) // New: controls when Start Answer button is shown
+  const [canStartAnswer, setCanStartAnswer] = useState(false) // Controls when system is ready for candidate to answer (conversational flow - no buttons)
   
   // Phase 1: Real-time conversation state
   const [lastSpeechTime, setLastSpeechTime] = useState(null)
@@ -91,8 +91,8 @@ export default function InterviewSession() {
   const sessionStartTimeRef = useRef(null) // When the interview session started
   const currentQuestionStartTimeRef = useRef(null) // When current question started being spoken
   const currentQuestionEndTimeRef = useRef(null) // When current question finished being spoken
-  const currentAnswerStartTimeRef = useRef(null) // When candidate clicked start answer (or auto-detected)
-  const currentAnswerEndTimeRef = useRef(null) // When candidate clicked stop answer
+  const currentAnswerStartTimeRef = useRef(null) // When candidate naturally started speaking (auto-detected via VAD)
+  const currentAnswerEndTimeRef = useRef(null) // When candidate finished answering (auto-detected or explicitly ended)
 
   useEffect(() => {
     // Prevent duplicate initialization
@@ -1364,7 +1364,7 @@ export default function InterviewSession() {
 
       recognition.onend = () => {
         setIsListening(false)
-        // Don't auto-restart - user controls when to start/stop via buttons
+        // Speech recognition will be restarted automatically when next question begins
       }
 
       recognitionRef.current = recognition
@@ -1505,7 +1505,7 @@ export default function InterviewSession() {
       console.log('Full session recording started')
     }
     
-    // Reset answer button state
+    // Reset answer readiness state (system tracks when candidate can naturally respond)
     setCanStartAnswer(false)
     
     // Greet the candidate
@@ -1524,17 +1524,17 @@ export default function InterviewSession() {
     setCurrentQuestion(firstQuestion)
     currentQuestionIdRef.current = firstQuestion.id // Store question ID in ref
     
-    // Speak the question and ONLY enable answer button after speech completes
+    // Speak the question and mark system as ready for candidate to answer naturally
     try {
       console.log('Starting to speak question:', firstQuestion.text?.substring(0, 50))
       await speakQuestion(firstQuestion)
-      console.log('Question spoken successfully, enabling answer button')
+      console.log('Question spoken successfully, system ready for candidate response')
       setCanStartAnswer(true)
     } catch (error) {
       console.error('Error speaking question:', error)
-      // Fallback: Enable after 3 seconds if speech fails
+      // Fallback: Mark ready after 3 seconds if speech fails
       setTimeout(() => {
-        console.log('Fallback: Enabling answer button after speech error')
+        console.log('Fallback: System ready for candidate response after speech error')
         setCanStartAnswer(true)
       }, 3000)
     }
@@ -1741,7 +1741,8 @@ export default function InterviewSession() {
     }
     questionTimestampsRef.current[questionId].questionStartTime = currentQuestionStartTimeRef.current
     
-    // Start question-specific recording when question begins (not when candidate clicks button)
+    // Start question-specific recording automatically when question begins speaking
+    // This captures the entire conversational flow: question period, gap period, and answer period
     const recorder = mediaRecorderRef.current || mediaRecorder
     if (recorder && recorder.state === 'inactive') {
       setVideoChunks([])
@@ -1881,7 +1882,8 @@ export default function InterviewSession() {
         }
       }
       
-      // Track when candidate clicks "Start Answer" (recording should already be running from question start)
+      // Track when candidate naturally starts speaking (recording should already be running from question start)
+      // This is for manual startAnswering() calls (legacy support), but normally answer tracking starts automatically
       const questionId = currentQuestionIdRef.current
       currentAnswerStartTimeRef.current = Date.now()
       if (questionId && questionTimestampsRef.current[questionId]) {
@@ -1903,7 +1905,7 @@ export default function InterviewSession() {
       }
       
       isAnsweringRef.current = true
-      setCanStartAnswer(false) // Hide Start Answer button
+      setCanStartAnswer(false) // System is now tracking answer
       
       // Start frame capture for cheating detection
       startFrameCapture()
@@ -2336,13 +2338,13 @@ export default function InterviewSession() {
       
       try {
         await speakQuestion(followUpQuestion)
-        console.log('Follow-up question spoken, enabling answer button')
+        console.log('Follow-up question spoken, system ready for candidate response')
         setCanStartAnswer(true)
       } catch (error) {
         console.error('Error speaking follow-up question:', error)
-        // Fallback: Enable after 3 seconds if speech fails
+        // Fallback: Mark ready after 3 seconds if speech fails
         setTimeout(() => {
-          console.log('Fallback: Enabling answer button after speech error')
+          console.log('Fallback: System ready for candidate response after speech error')
           setCanStartAnswer(true)
         }, 3000)
       }
@@ -2375,13 +2377,13 @@ export default function InterviewSession() {
         
         try {
           await speakQuestion(newQuestion)
-          console.log('Next question spoken, enabling answer button')
+          console.log('Next question spoken, system ready for candidate response')
           setCanStartAnswer(true)
         } catch (error) {
           console.error('Error speaking next question:', error)
-          // Fallback: Enable after 3 seconds if speech fails
+          // Fallback: Mark ready after 3 seconds if speech fails
           setTimeout(() => {
-            console.log('Fallback: Enabling answer button after speech error')
+            console.log('Fallback: System ready for candidate response after speech error')
             setCanStartAnswer(true)
           }, 3000)
         }

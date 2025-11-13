@@ -1211,7 +1211,7 @@ io.on('connection', (socket) => {
           type: 'processing_answer'
         });
 
-        // Trigger answer processing (this will be handled by the client's handleStopAnswer)
+        // Trigger answer processing (this will be handled by the client's stopAnswering function)
         socket.emit('process-answer-now', {
           questionId: questionId,
           reason: 'candidate_done'
