@@ -483,8 +483,10 @@ router.get('/:id', async (req, res) => {
       }
     }
 
-    // For candidates, also check if interview is published
-    if (req.user.role === 'candidate' && !interview.isPublished) {
+    // For candidates accessing templates (not candidate-specific attempts), check if interview is published
+    // Candidate-specific attempts (with candidateId/candidateEmail) should be accessible regardless of isPublished
+    const isTemplate = !interview.candidateId && !interview.candidateEmail;
+    if (req.user.role === 'candidate' && isTemplate && !interview.isPublished) {
       return res.status(403).json({ message: 'This interview is not published yet' });
     }
 
