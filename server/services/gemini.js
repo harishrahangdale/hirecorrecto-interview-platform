@@ -1208,15 +1208,18 @@ IMPORTANT TRANSCRIPTION GUIDELINES:
 
     try {
       const answeredQuestions = interview.questions.filter(q => q.answeredAt && q.evaluation);
+      
+      // Minimum 3 questions required for a reliable recommendation
+      const MIN_QUESTIONS_FOR_RECOMMENDATION = 3;
+      
       if (answeredQuestions.length === 0) {
-        // Return a default recommendation instead of throwing error
-        return {
-          fitStatus: 'incomplete',
-          recommendationSummary: 'No answered questions found. Cannot generate recommendation.',
-          strengths: [],
-          weaknesses: [],
-          token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
-        };
+        // Return null fitStatus to indicate no recommendation can be generated
+        throw new Error('No answered questions found. Cannot generate recommendation.');
+      }
+      
+      if (answeredQuestions.length < MIN_QUESTIONS_FOR_RECOMMENDATION) {
+        // Return null fitStatus to indicate insufficient data
+        throw new Error(`Insufficient data: Only ${answeredQuestions.length} question(s) answered. At least ${MIN_QUESTIONS_FOR_RECOMMENDATION} questions are required for a reliable recommendation.`);
       }
 
       // Build comprehensive interview summary

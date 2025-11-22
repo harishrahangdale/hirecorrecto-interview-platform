@@ -1415,9 +1415,11 @@ router.post('/:id/complete', requireRole(['candidate']), async (req, res) => {
     interview.calculateAggregateScores();
     interview.calculateTokenUsage();
     
-    // Generate overall AI recommendation (only if there are answered questions)
+    // Generate overall AI recommendation (only if there are enough answered questions)
     const answeredQuestions = interview.questions.filter(q => q.answeredAt && q.evaluation);
-    if (answeredQuestions.length > 0) {
+    const MIN_QUESTIONS_FOR_RECOMMENDATION = 3;
+    
+    if (answeredQuestions.length >= MIN_QUESTIONS_FOR_RECOMMENDATION) {
       try {
         const recommendation = await generateOverallRecommendation(interview);
         interview.aiRecommendation = {
@@ -1442,25 +1444,13 @@ router.post('/:id/complete', requireRole(['candidate']), async (req, res) => {
       } catch (error) {
         console.error('Error generating overall recommendation:', error);
         // Don't fail interview completion if recommendation generation fails
-        // Set a default recommendation instead
-        interview.aiRecommendation = {
-          fitStatus: 'incomplete',
-          recommendationSummary: 'Interview completed but no recommendations available. Not enough answered questions for analysis.',
-          strengths: [],
-          weaknesses: [],
-          generatedAt: new Date()
-        };
+        // Set aiRecommendation to null (no recommendation available)
+        interview.aiRecommendation = null;
       }
     } else {
-      // No answered questions - set default recommendation
-      console.log('No answered questions found, skipping recommendation generation');
-      interview.aiRecommendation = {
-        fitStatus: 'incomplete',
-        recommendationSummary: 'Interview completed but no questions were answered. Please complete the interview to receive a recommendation.',
-        strengths: [],
-        weaknesses: [],
-        generatedAt: new Date()
-      };
+      // Insufficient questions - don't generate recommendation
+      console.log(`Insufficient questions for recommendation: ${answeredQuestions.length} answered (minimum ${MIN_QUESTIONS_FOR_RECOMMENDATION} required)`);
+      interview.aiRecommendation = null;
     }
     
     // Ensure total tokens is calculated

@@ -25,6 +25,9 @@ const io = new Server(server, {
   }
 });
 
+// Trust proxy for rate limiting behind reverse proxy (Render, etc.)
+app.set('trust proxy', true);
+
 // Security middleware
 app.use(helmet());
 app.use(cors({
@@ -553,32 +556,63 @@ io.on('connection', (socket) => {
         try {
           const session = geminiService.getSession(sessionId);
           if (session) {
-            const interview = await Interview.findById(session.interviewId);
-            if (interview) {
-              const question = interview.questions.find(q => q.id === questionId);
-              if (question) {
+            // Use findByIdAndUpdate with retry logic to handle version conflicts
+            const maxRetries = 3;
+            let retryCount = 0;
+            let success = false;
+            
+            while (retryCount < maxRetries && !success) {
+              try {
+                const interview = await Interview.findById(session.interviewId);
+                if (!interview) break;
+                
+                const question = interview.questions.find(q => q.id === questionId);
+                if (!question) break;
+                
                 if (!question.conversationTurns) {
                   question.conversationTurns = [];
                 }
                 
                 // Check if this is a continuation of previous candidate turn or new turn
                 const lastTurn = question.conversationTurns[question.conversationTurns.length - 1];
-                if (lastTurn && lastTurn.speaker === 'candidate' && (Date.now() - lastTurn.timestamp) < 5000) {
+                const now = Date.now();
+                
+                if (lastTurn && lastTurn.speaker === 'candidate' && (now - lastTurn.timestamp) < 5000) {
                   // Append to last turn (within 5 seconds)
                   lastTurn.text += ' ' + transcriptChunk.trim();
-                  lastTurn.timestamp = Date.now();
+                  lastTurn.timestamp = now;
                 } else {
                   // New turn
                   question.conversationTurns.push({
-                    turnId: `turn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    turnId: `turn_${now}_${Math.random().toString(36).substr(2, 9)}`,
                     speaker: 'candidate',
                     text: transcriptChunk.trim(),
-                    timestamp: Date.now(),
+                    timestamp: now,
                     transcript: transcriptChunk.trim()
                   });
                 }
                 
-                await interview.save();
+                // Use findByIdAndUpdate to avoid version conflicts
+                const questionIndex = interview.questions.findIndex(q => q.id === questionId);
+                await Interview.findByIdAndUpdate(
+                  session.interviewId,
+                  {
+                    $set: {
+                      [`questions.${questionIndex}.conversationTurns`]: question.conversationTurns
+                    }
+                  },
+                  { new: true }
+                );
+                
+                success = true;
+              } catch (versionError) {
+                retryCount++;
+                if (retryCount >= maxRetries) {
+                  console.error('Error storing candidate conversation turn after retries:', versionError);
+                } else {
+                  // Wait a bit before retrying (exponential backoff)
+                  await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
+                }
               }
             }
           }
