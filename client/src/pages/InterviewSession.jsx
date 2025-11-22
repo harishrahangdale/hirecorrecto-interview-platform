@@ -566,6 +566,27 @@ export default function InterviewSession() {
         }
       })
       
+      newSocket.on('gemini-session-error', (error) => {
+        console.error('❌ Gemini session error:', error)
+        if (sessionTimeoutRef.current) {
+          clearTimeout(sessionTimeoutRef.current)
+          sessionTimeoutRef.current = null
+        }
+        const errorMessage = error?.message || error?.toString() || 'Unknown error occurred'
+        
+        // Handle completed interview case specially
+        if (error?.status === 'completed') {
+          toast.error('This interview has already been completed. You cannot start a new session.')
+          setSessionStatus('error')
+          setTimeout(() => {
+            navigate('/')
+          }, 3000)
+        } else {
+          toast.error('Failed to start interview session: ' + errorMessage)
+          setSessionStatus('error')
+        }
+      })
+      
       newSocket.on('gemini-error', (error) => {
         console.error('❌ Gemini error:', error)
         if (sessionTimeoutRef.current) {

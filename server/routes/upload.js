@@ -107,11 +107,20 @@ router.get('/url/:interviewId/:questionId', (req, res) => {
 router.post('/:interviewId/:questionId', upload.single('video'), async (req, res) => {
   try {
     if (!req.file) {
+      console.error('Upload failed: No video file in request');
       return res.status(400).json({ message: 'No video file uploaded' });
     }
 
     const { interviewId, questionId } = req.params;
     const isFullSession = req.body.isFullSession === 'true' || req.body.isFullSession === true;
+    
+    console.log(`Uploading video for interview ${interviewId}, question ${questionId}:`, {
+      filename: req.file.originalname,
+      size: req.file.size,
+      mimetype: req.file.mimetype,
+      isFullSession: isFullSession,
+      storageBackend: storageBackend
+    });
     
     let uploadResult;
     
@@ -156,6 +165,12 @@ router.post('/:interviewId/:questionId', upload.single('video'), async (req, res
         };
       }
     }
+    
+    console.log(`✅ Video uploaded successfully:`, {
+      fileUrl: uploadResult.fileUrl,
+      filename: uploadResult.filename,
+      size: uploadResult.size
+    });
     
     res.json({
       message: 'Video uploaded successfully',

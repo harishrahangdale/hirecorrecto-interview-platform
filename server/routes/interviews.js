@@ -891,6 +891,17 @@ router.post('/:id/questions/:questionId/answer', requireRole(['candidate']), [
 
     const { videoUrl, transcript, geminiResponse } = req.body;
     const questionText = geminiResponse?.questionText || req.body.questionText;
+    
+    // Normalize videoUrl: convert empty string to null for cleaner data
+    const normalizedVideoUrl = videoUrl && videoUrl.trim() ? videoUrl.trim() : null;
+    
+    console.log(`Submitting answer for question ${req.params.questionId}:`, {
+      hasVideoUrl: !!normalizedVideoUrl,
+      videoUrl: normalizedVideoUrl,
+      hasTranscript: !!transcript,
+      transcriptLength: transcript?.length || 0
+    });
+    
     const interview = await Interview.findById(req.params.id);
 
     if (!interview) {
@@ -919,7 +930,7 @@ router.post('/:id/questions/:questionId/answer', requireRole(['candidate']), [
         text: questionText || geminiResponse?.questionText || 'Dynamic question',
         type: 'dynamic',
         order: interview.questions.length + 1,
-        videoUrl: videoUrl, // Ensure videoUrl is saved
+        videoUrl: normalizedVideoUrl, // Ensure videoUrl is saved (null if empty)
         transcript: transcript || geminiResponse?.transcript || '',
         evaluation: geminiResponse?.evaluation || {},
         cheating: geminiResponse?.cheating || {},
@@ -935,7 +946,7 @@ router.post('/:id/questions/:questionId/answer', requireRole(['candidate']), [
         question.text = geminiResponse.questionText;
       }
       // Always update videoUrl - this is critical for per-question video recording
-      question.videoUrl = videoUrl;
+      question.videoUrl = normalizedVideoUrl; // Use normalized value (null if empty)
       question.transcript = transcript || geminiResponse?.transcript || question.transcript;
       question.evaluation = geminiResponse?.evaluation || question.evaluation;
       question.cheating = geminiResponse?.cheating || question.cheating;

@@ -26,7 +26,8 @@ const io = new Server(server, {
 });
 
 // Trust proxy for rate limiting behind reverse proxy (Render, etc.)
-app.set('trust proxy', true);
+// Set to 1 to trust only the first proxy (Render's reverse proxy)
+app.set('trust proxy', 1);
 
 // Security middleware
 app.use(helmet());
@@ -157,6 +158,16 @@ io.on('connection', (socket) => {
       // Check if interview is in the correct status
       if (interview.status !== 'in_progress') {
         console.warn(`Interview ${interviewId} is not in progress. Current status: ${interview.status}`);
+        
+        // If interview is completed, don't allow starting a new session
+        if (interview.status === 'completed') {
+          socket.emit('gemini-session-error', {
+            message: 'This interview has already been completed. You cannot start a new session.',
+            status: 'completed'
+          });
+          return;
+        }
+        
         // Try to start the interview if it's in 'invited' status
         if (interview.status === 'invited') {
           interview.status = 'in_progress';
@@ -164,7 +175,13 @@ io.on('connection', (socket) => {
           await interview.save();
           console.log(`Auto-started interview ${interviewId}`);
         } else {
-          throw new Error(`Interview cannot be started. Current status: ${interview.status}`);
+          if (socket.connected) {
+            socket.emit('gemini-session-error', {
+              message: `Interview cannot be started. Current status: ${interview.status}`,
+              status: interview.status
+            });
+          }
+          return;
         }
       }
 
