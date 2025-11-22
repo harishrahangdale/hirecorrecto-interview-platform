@@ -721,6 +721,26 @@ router.post('/:id/start', requireRole(['candidate']), async (req, res) => {
     
     // Check if this candidate already has an interview attempt for this template
     // Find by matching template (title + recruiterId) and candidate
+    // First check for completed interviews - if one exists, prevent starting a new one
+    const completedInterview = await Interview.findOne({
+      recruiterId: interview.recruiterId,
+      title: interview.title, // Match the template title
+      $or: [
+        { candidateId: req.user._id },
+        { candidateEmail: req.user.email.toLowerCase() }
+      ],
+      isPublished: false, // Candidate attempts are not published templates
+      status: 'completed'
+    }).sort({ completedAt: -1 }); // Get most recently completed
+
+    if (completedInterview) {
+      return res.status(400).json({ 
+        message: 'This interview has already been completed',
+        completedInterviewId: completedInterview._id
+      });
+    }
+
+    // Now check for in_progress interviews - prioritize these
     let candidateInterview = await Interview.findOne({
       recruiterId: interview.recruiterId,
       title: interview.title, // Match the template title
@@ -728,8 +748,23 @@ router.post('/:id/start', requireRole(['candidate']), async (req, res) => {
         { candidateId: req.user._id },
         { candidateEmail: req.user.email.toLowerCase() }
       ],
-      isPublished: false // Candidate attempts are not published templates
-    });
+      isPublished: false, // Candidate attempts are not published templates
+      status: 'in_progress'
+    }).sort({ startedAt: -1 }); // Get most recently started
+
+    // If no in_progress interview exists, check for any other status (draft, invited, etc.)
+    if (!candidateInterview) {
+      candidateInterview = await Interview.findOne({
+        recruiterId: interview.recruiterId,
+        title: interview.title,
+        $or: [
+          { candidateId: req.user._id },
+          { candidateEmail: req.user.email.toLowerCase() }
+        ],
+        isPublished: false,
+        status: { $ne: 'completed' } // Exclude completed
+      }).sort({ createdAt: -1 }); // Get most recently created
+    }
 
     // If no candidate-specific attempt exists, create one by cloning the template
     if (!candidateInterview) {
@@ -763,8 +798,6 @@ router.post('/:id/start', requireRole(['candidate']), async (req, res) => {
       // Resume existing attempt
       if (candidateInterview.status === 'in_progress') {
         // Already in progress, just return it
-      } else if (candidateInterview.status === 'completed') {
-        return res.status(400).json({ message: 'This interview has already been completed' });
       } else {
         // Resume from invited or other status
         candidateInterview.status = 'in_progress';
@@ -1310,8 +1343,25 @@ router.post('/:id/complete', requireRole(['candidate']), async (req, res) => {
       return res.status(400).json({ message: 'Cannot complete interview template. Please complete your interview attempt.' });
     }
 
+    // Check if already completed (idempotency check)
+    if (interview.status === 'completed') {
+      return res.json({
+        message: 'Interview was already completed',
+        interview: {
+          id: interview._id,
+          status: interview.status,
+          completedAt: interview.completedAt,
+          aggregateScores: interview.aggregateScores,
+          totalTokenUsage: interview.totalTokenUsage,
+          totalCost: interview.totalCost,
+          totalCostINR: interview.totalCost ? convertToINR(interview.totalCost) : 0,
+          geminiModel: interview.geminiModel
+        }
+      });
+    }
+
     if (interview.status !== 'in_progress') {
-      return res.status(400).json({ message: 'Interview is not in progress' });
+      return res.status(400).json({ message: `Interview is not in progress. Current status: ${interview.status}` });
     }
 
     // Update the candidate-specific interview attempt (not the template)
