@@ -198,6 +198,7 @@ class StorageService {
    */
   async uploadToAzure(fileBuffer, fileKey, originalFilename) {
     try {
+      const AzureStorageBlob = require('@azure/storage-blob');
       const blockBlobClient = this.containerClient.getBlockBlobClient(fileKey);
       
       // Upload file to Azure Blob Storage
@@ -211,10 +212,36 @@ class StorageService {
         }
       });
       
-      // Generate URL (use CDN if available, otherwise blob URL)
-      const fileUrl = this.cdnUrl 
-        ? `${this.cdnUrl}/${fileKey}`
-        : blockBlobClient.url;
+      // Generate URL - for Azure private containers, we need signed URLs (SAS)
+      // Azure containers are private by default, so we always generate signed URLs
+      // Generate a long-lived signed URL (1 year expiration) for video access
+      const expiresOn = new Date();
+      expiresOn.setFullYear(expiresOn.getFullYear() + 1); // 1 year expiration
+      
+      let fileUrl;
+      try {
+        // Generate signed URL (SAS) for private container access
+        fileUrl = await blockBlobClient.generateSasUrl({
+          permissions: AzureStorageBlob.BlobSASPermissions.parse('r'), // Read permission only
+          expiresOn: expiresOn
+        });
+        console.log(`✅ Generated signed URL for Azure blob: ${fileKey.substring(0, 50)}... (expires in 1 year)`);
+        
+        // If CDN is configured, we could use CDN URL with SAS, but for simplicity,
+        // we use the signed blob URL directly. CDN can be configured separately if needed.
+        // Note: If container is public and CDN is used, you can set AZURE_USE_PUBLIC_URLS=true
+        // to use direct CDN URLs instead of signed URLs
+        if (this.cdnUrl && process.env.AZURE_USE_PUBLIC_URLS === 'true') {
+          // Use CDN URL if container is public (requires AZURE_USE_PUBLIC_URLS=true)
+          fileUrl = `${this.cdnUrl}/${fileKey}`;
+          console.log(`Using CDN URL (container is public): ${fileUrl.substring(0, 50)}...`);
+        }
+      } catch (sasError) {
+        console.error('Failed to generate signed URL:', sasError.message);
+        // Fallback: try direct blob URL (will only work if container is public)
+        fileUrl = this.cdnUrl ? `${this.cdnUrl}/${fileKey}` : blockBlobClient.url;
+        console.warn('Using direct/blob URL (may not work if container is private):', fileUrl.substring(0, 50));
+      }
 
       return {
         filename: path.basename(fileKey),
