@@ -208,23 +208,37 @@ router.get('/interviews/:id/results', requireRole(['recruiter']), async (req, re
         } : {
           email: interview.candidateEmail
         },
-        questions: interview.questions.map(q => ({
-          id: q.id,
-          text: q.text,
-          type: q.type,
-          order: q.order,
-          skillsTargeted: q.skillsTargeted || [],
-          videoUrl: q.videoUrl,
-          transcript: q.transcript,
-          // Phase 3: Include conversation data
-          finalTranscript: q.finalTranscript || q.transcript, // Fallback to transcript if finalTranscript not available
-          conversationTurns: q.conversationTurns || [],
-          videoSegment: q.videoSegment || null,
-          evaluation: q.evaluation,
-          cheating: q.cheating,
-          token_usage: q.token_usage,
-          answeredAt: q.answeredAt
-        })),
+        questions: interview.questions.map(q => {
+          // Log question data for debugging
+          console.log(`Question ${q.id}:`, {
+            hasVideoUrl: !!q.videoUrl,
+            videoUrl: q.videoUrl,
+            hasTranscript: !!q.transcript,
+            transcriptLength: q.transcript?.length || 0,
+            hasFinalTranscript: !!q.finalTranscript,
+            finalTranscriptLength: q.finalTranscript?.length || 0,
+            hasEvaluation: !!q.evaluation,
+            answeredAt: q.answeredAt
+          });
+          
+          return {
+            id: q.id,
+            text: q.text,
+            type: q.type,
+            order: q.order,
+            skillsTargeted: q.skillsTargeted || [],
+            videoUrl: q.videoUrl || null, // Ensure null instead of undefined
+            transcript: q.transcript || null, // Ensure null instead of undefined
+            // Phase 3: Include conversation data
+            finalTranscript: q.finalTranscript || q.transcript || null, // Fallback to transcript if finalTranscript not available
+            conversationTurns: q.conversationTurns || [],
+            videoSegment: q.videoSegment || null,
+            evaluation: q.evaluation || null,
+            cheating: q.cheating || null,
+            token_usage: q.token_usage || null,
+            answeredAt: q.answeredAt || null
+          };
+        }),
         aggregateScores: aggregateScores,
         aiRecommendation: isCompleted ? (interview.aiRecommendation || {}) : null,
         totalTokenUsage: interview.totalTokenUsage || { input_tokens: 0, output_tokens: 0, total_tokens: 0 },

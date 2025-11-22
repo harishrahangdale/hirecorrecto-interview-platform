@@ -22,6 +22,15 @@ export default function InterviewResults() {
   const fetchResults = async () => {
     try {
       const response = await reportsAPI.getInterviewResults(id)
+      console.log('Interview results data:', response.data.interview)
+      console.log('Questions with data:', response.data.interview.questions.map(q => ({
+        id: q.id,
+        hasVideo: !!q.videoUrl,
+        videoUrl: q.videoUrl,
+        hasTranscript: !!(q.transcript || q.finalTranscript),
+        transcript: q.transcript,
+        finalTranscript: q.finalTranscript
+      })))
       setInterview(response.data.interview)
     } catch (error) {
       console.error('Error fetching results:', error)
@@ -1119,58 +1128,80 @@ export default function InterviewResults() {
                 </div>
 
                 {/* Video Recording */}
-                {selectedQuestion.videoUrl && (
-                  <div>
-                    <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center space-x-2">
-                      <Video className="h-4 w-4" />
-                      <span>Video Recording</span>
-                    </h4>
-                    <div className="bg-black rounded-lg overflow-hidden aspect-video">
-                      <ReactPlayer
-                        url={selectedQuestion.videoUrl}
-                        controls
-                        width="100%"
-                        height="100%"
-                        config={{
-                          file: {
-                            attributes: {
-                              controlsList: 'nodownload'
+                <div>
+                  <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center space-x-2">
+                    <Video className="h-4 w-4" />
+                    <span>Video Recording</span>
+                  </h4>
+                  {selectedQuestion.videoUrl ? (
+                    <>
+                      <div className="bg-black rounded-lg overflow-hidden aspect-video">
+                        <ReactPlayer
+                          url={selectedQuestion.videoUrl}
+                          controls
+                          width="100%"
+                          height="100%"
+                          config={{
+                            file: {
+                              attributes: {
+                                controlsList: 'nodownload'
+                              }
                             }
-                          }
-                        }}
-                      />
+                          }}
+                          onError={(error) => {
+                            console.error('Video playback error:', error)
+                            toast.error('Failed to load video. Please check the video URL.')
+                          }}
+                        />
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Video URL: <a href={selectedQuestion.videoUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline break-all">{selectedQuestion.videoUrl}</a>
+                      </p>
+                    </>
+                  ) : (
+                    <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+                      <p className="text-sm text-yellow-800">
+                        <AlertTriangle className="h-4 w-4 inline mr-2" />
+                        No video recording available for this question. The video may not have been uploaded successfully.
+                      </p>
                     </div>
-                    <p className="text-xs text-gray-500 mt-2">
-                      Video URL: <a href={selectedQuestion.videoUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline break-all">{selectedQuestion.videoUrl}</a>
-                    </p>
-                  </div>
-                )}
+                  )}
+                </div>
 
                 {/* Transcript - Phase 3: Show finalTranscript if available, otherwise transcript */}
-                {(selectedQuestion.finalTranscript || selectedQuestion.transcript) && (
-                  <div>
-                    <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center space-x-2">
-                      <FileText className="h-4 w-4" />
-                      <span>
-                        {selectedQuestion.finalTranscript 
-                          ? 'Full Conversation Transcript' 
-                          : 'Candidate Answer Transcript'}
-                      </span>
-                    </h4>
-                    <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
-                      <p className="text-gray-900 whitespace-pre-wrap">
-                        {selectedQuestion.finalTranscript || selectedQuestion.transcript}
+                <div>
+                  <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center space-x-2">
+                    <FileText className="h-4 w-4" />
+                    <span>
+                      {selectedQuestion.finalTranscript 
+                        ? 'Full Conversation Transcript' 
+                        : 'Candidate Answer Transcript'}
+                    </span>
+                  </h4>
+                  {(selectedQuestion.finalTranscript || selectedQuestion.transcript) ? (
+                    <>
+                      <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
+                        <p className="text-gray-900 whitespace-pre-wrap">
+                          {selectedQuestion.finalTranscript || selectedQuestion.transcript}
+                        </p>
+                      </div>
+                      {selectedQuestion.finalTranscript && selectedQuestion.transcript && 
+                       selectedQuestion.finalTranscript !== selectedQuestion.transcript && (
+                        <p className="text-xs text-gray-500 mt-2 italic">
+                          Note: This is the full conversation including bot questions and follow-ups. 
+                          The original candidate-only transcript is also available below.
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+                      <p className="text-sm text-yellow-800">
+                        <AlertTriangle className="h-4 w-4 inline mr-2" />
+                        No transcript available for this question. The transcript may not have been captured during the interview.
                       </p>
                     </div>
-                    {selectedQuestion.finalTranscript && selectedQuestion.transcript && 
-                     selectedQuestion.finalTranscript !== selectedQuestion.transcript && (
-                      <p className="text-xs text-gray-500 mt-2 italic">
-                        Note: This is the full conversation including bot questions and follow-ups. 
-                        The original candidate-only transcript is also available below.
-                      </p>
-                    )}
-                  </div>
-                )}
+                  )}
+                </div>
 
                 {/* Phase 3: Conversation Turns (if available and different from finalTranscript) */}
                 {selectedQuestion.conversationTurns && selectedQuestion.conversationTurns.length > 0 && (
