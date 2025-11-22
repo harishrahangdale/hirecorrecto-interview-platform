@@ -1347,65 +1347,86 @@ router.post('/:id/complete', requireRole(['candidate']), async (req, res) => {
       interview.fullSessionVideoUrl = req.body.fullSessionVideoUrl;
     }
     
-      // Calculate final scores
-      interview.calculateAggregateScores();
-      interview.calculateTokenUsage();
-      
-      // Generate overall AI recommendation (only if there are answered questions)
-      const answeredQuestions = interview.questions.filter(q => q.answeredAt && q.evaluation);
-      if (answeredQuestions.length > 0) {
-        try {
-          const recommendation = await generateOverallRecommendation(interview);
-          interview.aiRecommendation = {
-            fitStatus: recommendation.fitStatus,
-            recommendationSummary: recommendation.recommendationSummary,
-            strengths: recommendation.strengths || [],
-            weaknesses: recommendation.weaknesses || [],
-            generatedAt: new Date()
-          };
-          
-          // Update token usage and cost for recommendation generation
-          const recInputTokens = recommendation.token_usage?.input_tokens || 0;
-          const recOutputTokens = recommendation.token_usage?.output_tokens || 0;
-          interview.totalTokenUsage.input_tokens += recInputTokens;
-          interview.totalTokenUsage.output_tokens += recOutputTokens;
-          interview.totalTokenUsage.total_tokens = interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
-          
-          if (interview.geminiModel) {
-            const recCost = calculateCost(recInputTokens, recOutputTokens, interview.geminiModel);
-            interview.totalCost += recCost;
-          }
-        } catch (error) {
-          console.error('Error generating overall recommendation:', error);
-          // Don't fail interview completion if recommendation generation fails
-          // Set a default recommendation instead
-          interview.aiRecommendation = {
-            fitStatus: 'incomplete',
-            recommendationSummary: 'Interview completed but no recommendations available. Not enough answered questions for analysis.',
-            strengths: [],
-            weaknesses: [],
-            generatedAt: new Date()
-          };
+    // Ensure totalTokenUsage is initialized
+    if (!interview.totalTokenUsage) {
+      interview.totalTokenUsage = {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0
+      };
+    }
+    
+    // Ensure totalCost is initialized
+    if (interview.totalCost === undefined || interview.totalCost === null) {
+      interview.totalCost = 0;
+    }
+    
+    // Calculate final scores
+    interview.calculateAggregateScores();
+    interview.calculateTokenUsage();
+    
+    // Generate overall AI recommendation (only if there are answered questions)
+    const answeredQuestions = interview.questions.filter(q => q.answeredAt && q.evaluation);
+    if (answeredQuestions.length > 0) {
+      try {
+        const recommendation = await generateOverallRecommendation(interview);
+        interview.aiRecommendation = {
+          fitStatus: recommendation.fitStatus,
+          recommendationSummary: recommendation.recommendationSummary,
+          strengths: recommendation.strengths || [],
+          weaknesses: recommendation.weaknesses || [],
+          generatedAt: new Date()
+        };
+        
+        // Update token usage and cost for recommendation generation
+        const recInputTokens = recommendation.token_usage?.input_tokens || 0;
+        const recOutputTokens = recommendation.token_usage?.output_tokens || 0;
+        interview.totalTokenUsage.input_tokens = (interview.totalTokenUsage.input_tokens || 0) + recInputTokens;
+        interview.totalTokenUsage.output_tokens = (interview.totalTokenUsage.output_tokens || 0) + recOutputTokens;
+        interview.totalTokenUsage.total_tokens = interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
+        
+        if (interview.geminiModel) {
+          const recCost = calculateCost(recInputTokens, recOutputTokens, interview.geminiModel);
+          interview.totalCost = (interview.totalCost || 0) + recCost;
         }
-      } else {
-        // No answered questions - set default recommendation
-        console.log('No answered questions found, skipping recommendation generation');
+      } catch (error) {
+        console.error('Error generating overall recommendation:', error);
+        // Don't fail interview completion if recommendation generation fails
+        // Set a default recommendation instead
         interview.aiRecommendation = {
           fitStatus: 'incomplete',
-          recommendationSummary: 'Interview completed but no questions were answered. Please complete the interview to receive a recommendation.',
+          recommendationSummary: 'Interview completed but no recommendations available. Not enough answered questions for analysis.',
           strengths: [],
           weaknesses: [],
           generatedAt: new Date()
         };
       }
-      
-      // Ensure total tokens is calculated
-      if (!interview.totalTokenUsage.total_tokens) {
-        interview.totalTokenUsage.total_tokens = 
-          interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
+    } else {
+      // No answered questions - set default recommendation
+      console.log('No answered questions found, skipping recommendation generation');
+      interview.aiRecommendation = {
+        fitStatus: 'incomplete',
+        recommendationSummary: 'Interview completed but no questions were answered. Please complete the interview to receive a recommendation.',
+        strengths: [],
+        weaknesses: [],
+        generatedAt: new Date()
+      };
+    }
+    
+    // Ensure total tokens is calculated
+    if (!interview.totalTokenUsage || !interview.totalTokenUsage.total_tokens) {
+      if (!interview.totalTokenUsage) {
+        interview.totalTokenUsage = {
+          input_tokens: 0,
+          output_tokens: 0,
+          total_tokens: 0
+        };
       }
+      interview.totalTokenUsage.total_tokens = 
+        (interview.totalTokenUsage.input_tokens || 0) + (interview.totalTokenUsage.output_tokens || 0);
+    }
 
-      await interview.save();
+    await interview.save();
 
     res.json({
       message: 'Interview completed successfully',
@@ -1422,7 +1443,11 @@ router.post('/:id/complete', requireRole(['candidate']), async (req, res) => {
     });
   } catch (error) {
     console.error('Complete interview error:', error);
-    res.status(500).json({ message: 'Server error completing interview' });
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      message: 'Server error completing interview',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
