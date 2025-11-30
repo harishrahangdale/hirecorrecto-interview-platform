@@ -394,78 +394,115 @@ io.on('connection', (socket) => {
       
       // If we need to generate next question, do it
       if (response.next_action === 'next_question') {
-        if (session) {
-          const answeredQuestions = session.answeredQuestions || [];
-          const lastAnswer = answeredQuestions[answeredQuestions.length - 1];
-          const interview = await Interview.findById(session.interviewId);
-          
-          // Check if we've reached max questions
-          if (interview.questions.length >= interview.maxQuestions) {
+        // Get session (refresh it to ensure we have the latest)
+        const currentSession = geminiService.getSession(sessionId);
+        if (!currentSession) {
+          console.error(`Session not found for sessionId: ${sessionId}`);
+          response.next_action = 'end_interview';
+          response.error = 'Session expired. Please refresh and try again.';
+        } else {
+          try {
+            const interview = await Interview.findById(currentSession.interviewId);
+            if (!interview) {
+              console.error(`Interview not found for sessionId: ${sessionId}, interviewId: ${currentSession.interviewId}`);
+              response.next_action = 'end_interview';
+              response.error = 'Interview not found.';
+            } else {
+              // Check if we've reached max questions
+              const answeredQuestions = interview.questions.filter(q => q.answeredAt);
+              if (answeredQuestions.length >= interview.maxQuestions) {
+                console.log(`Reached max questions (${interview.maxQuestions}), ending interview`);
+                response.next_action = 'end_interview';
+              } else {
+                // Update interview data in session with latest questions
+                currentSession.interviewData.questionHealth = interview.questionHealth || [];
+                
+                // Get the current question to extract skills
+                const currentQuestion = interview.questions.find(q => q.id === questionId);
+                
+                console.log(`Generating next question (${answeredQuestions.length + 1}/${interview.maxQuestions})...`);
+                
+                // Generate next question
+                const previousAnswer = {
+                  questionText: questionText,
+                  transcript: response.transcript,
+                  evaluation: response.evaluation,
+                  order: interview.questions.length,
+                  questionsAsked: answeredQuestions.length,
+                  skillsTargeted: currentQuestion?.skillsTargeted || [],
+                  interviewQuestions: interview.questions // Pass questions for distribution calculation
+                };
+                
+                const nextQuestion = await generateNextQuestion(sessionId, previousAnswer);
+                
+                if (!nextQuestion || !nextQuestion.id) {
+                  console.error('Failed to generate next question: Invalid response from generateNextQuestion');
+                  response.next_action = 'end_interview';
+                  response.error = 'Failed to generate next question.';
+                } else {
+                  // Save question to database with token usage
+                  interview.questions.push({
+                    id: nextQuestion.id,
+                    text: nextQuestion.text,
+                    type: nextQuestion.type,
+                    order: nextQuestion.order,
+                    skillsTargeted: nextQuestion.skillsTargeted || [],
+                    token_usage: nextQuestion.token_usage || { input_tokens: 0, output_tokens: 0 }
+                  });
+                  
+                  // Track question health
+                  if (interview.candidateId || interview.candidateEmail) {
+                    if (!interview.questionHealth) {
+                      interview.questionHealth = [];
+                    }
+                    interview.questionHealth.push({
+                      questionId: nextQuestion.id,
+                      questionText: nextQuestion.text,
+                      candidateId: interview.candidateId,
+                      candidateEmail: interview.candidateEmail,
+                      askedAt: new Date(),
+                      questionType: nextQuestion.questionType || 'generated'
+                    });
+                  }
+                  
+                  // Update interview token usage and cost
+                  const inputTokens = nextQuestion.token_usage?.input_tokens || 0;
+                  const outputTokens = nextQuestion.token_usage?.output_tokens || 0;
+                  interview.totalTokenUsage.input_tokens += inputTokens;
+                  interview.totalTokenUsage.output_tokens += outputTokens;
+                  interview.totalTokenUsage.total_tokens = interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
+                  interview.totalCost += calculateCost(inputTokens, outputTokens, interview.geminiModel);
+                  
+                  await interview.save();
+                  
+                  response.nextQuestion = {
+                    id: nextQuestion.id,
+                    text: nextQuestion.text,
+                    type: nextQuestion.type,
+                    order: nextQuestion.order
+                  };
+                  
+                  console.log(`✅ Next question generated: ${nextQuestion.id} - ${nextQuestion.text.substring(0, 50)}...`);
+                }
+              }
+            }
+          } catch (nextQuestionError) {
+            console.error('Error generating next question:', nextQuestionError);
+            console.error('Error stack:', nextQuestionError.stack);
+            // Don't fail the entire response, but mark that next question generation failed
             response.next_action = 'end_interview';
-          } else {
-            // Update interview data in session with latest questions
-            const session = geminiService.getSession(sessionId);
-            if (session) {
-              session.interviewData.questionHealth = interview.questionHealth || [];
-            }
-            
-            // Get the current question to extract skills
-            const currentQuestion = interview.questions.find(q => q.id === questionId);
-            
-            // Generate next question
-            const previousAnswer = {
-              questionText: questionText,
-              transcript: response.transcript,
-              evaluation: response.evaluation,
-              order: interview.questions.length,
-              questionsAsked: interview.questions.length,
-              skillsTargeted: currentQuestion?.skillsTargeted || [],
-              interviewQuestions: interview.questions // Pass questions for distribution calculation
-            };
-            
-            const nextQuestion = await generateNextQuestion(sessionId, previousAnswer);
-            
-            // Save question to database with token usage
-            interview.questions.push({
-              id: nextQuestion.id,
-              text: nextQuestion.text,
-              type: nextQuestion.type,
-              order: nextQuestion.order,
-              skillsTargeted: nextQuestion.skillsTargeted || [],
-              token_usage: nextQuestion.token_usage || { input_tokens: 0, output_tokens: 0 }
-            });
-            
-            // Track question health
-            if (interview.candidateId || interview.candidateEmail) {
-              interview.questionHealth.push({
-                questionId: nextQuestion.id,
-                questionText: nextQuestion.text,
-                candidateId: interview.candidateId,
-                candidateEmail: interview.candidateEmail,
-                askedAt: new Date(),
-                questionType: nextQuestion.questionType || 'generated'
-              });
-            }
-            
-            // Update interview token usage and cost
-            const inputTokens = nextQuestion.token_usage?.input_tokens || 0;
-            const outputTokens = nextQuestion.token_usage?.output_tokens || 0;
-            interview.totalTokenUsage.input_tokens += inputTokens;
-            interview.totalTokenUsage.output_tokens += outputTokens;
-            interview.totalTokenUsage.total_tokens = interview.totalTokenUsage.input_tokens + interview.totalTokenUsage.output_tokens;
-            interview.totalCost += calculateCost(inputTokens, outputTokens, interview.geminiModel);
-            
-            await interview.save();
-            
-            response.nextQuestion = {
-              id: nextQuestion.id,
-              text: nextQuestion.text,
-              type: nextQuestion.type,
-              order: nextQuestion.order
-            };
+            response.error = `Failed to generate next question: ${nextQuestionError.message}`;
           }
         }
       }
+      
+      // Log response before emitting to help debug
+      console.log(`📤 Emitting gemini-response:`, {
+        next_action: response.next_action,
+        hasNextQuestion: !!response.nextQuestion,
+        nextQuestionId: response.nextQuestion?.id,
+        error: response.error
+      });
       
       socket.emit('gemini-response', response);
     } catch (error) {

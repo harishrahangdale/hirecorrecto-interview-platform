@@ -2373,6 +2373,8 @@ export default function InterviewSession() {
       // Move to next question
       if (response.nextQuestion) {
         const newQuestion = response.nextQuestion
+        console.log('📝 Processing next question:', newQuestion.id, newQuestion.text.substring(0, 50))
+        
         setInterview(prev => ({
           ...prev,
           questions: [...prev.questions, newQuestion]
@@ -2398,7 +2400,7 @@ export default function InterviewSession() {
         
         try {
           await speakQuestion(newQuestion)
-          console.log('Next question spoken, system ready for candidate response')
+          console.log('✅ Next question spoken, system ready for candidate response')
           setCanStartAnswer(true)
         } catch (error) {
           console.error('Error speaking next question:', error)
@@ -2409,8 +2411,30 @@ export default function InterviewSession() {
           }, 3000)
         }
       } else {
-        // No more questions
-        completeInterview()
+        // Next question was requested but not generated
+        console.warn('⚠️ next_action is "next_question" but nextQuestion is missing:', response)
+        if (response.error) {
+          toast.error(response.error)
+        } else {
+          toast.error('Failed to generate next question. The interview will end.')
+        }
+        // Wait a bit before ending to show the error message
+        setTimeout(() => {
+          completeInterview()
+        }, 2000)
+      }
+    } else {
+      // Unknown or missing next_action
+      console.warn('⚠️ Unknown or missing next_action:', response.next_action, response)
+      // If we have a current question and it's been answered, try to continue
+      if (currentQuestion && interview?.questions?.length < (interview?.maxQuestions || 5)) {
+        console.log('Attempting to continue interview despite missing next_action')
+        setCanStartAnswer(true)
+      } else {
+        toast.error('Interview flow error. Ending interview.')
+        setTimeout(() => {
+          completeInterview()
+        }, 2000)
       }
     }
   }
