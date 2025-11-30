@@ -360,10 +360,34 @@ io.on('connection', (socket) => {
             if (response.cheating) {
               question.cheating = response.cheating;
             }
-            // Save transcript if provided
-            if (response.transcript) {
-              question.transcript = response.transcript;
+            
+            // Phase 3: Extract candidate transcript from conversation turns
+            // This preserves the actual candidate speech, not Gemini's processed version
+            if (question.conversationTurns && question.conversationTurns.length > 0) {
+              // Extract candidate-only transcript using helper method
+              const candidateTranscript = question.extractCandidateTranscript();
+              
+              // Save the actual candidate transcript (from speech recognition)
+              if (candidateTranscript) {
+                question.transcript = candidateTranscript;
+                console.log(`✅ [Gemini Audio] Saved candidate transcript (${candidateTranscript.length} chars) from conversation turns`);
+              } else if (response.transcript) {
+                // Fallback to Gemini's transcript if no candidate turns found
+                question.transcript = response.transcript;
+                console.log(`⚠️ [Gemini Audio] Using Gemini transcript as fallback (no candidate turns found)`);
+              }
+              
+              // Generate full conversation transcript (bot + candidate)
+              question.aggregateTranscript();
+            } else {
+              // No conversation turns - use Gemini's transcript as fallback
+              if (response.transcript) {
+                question.transcript = response.transcript;
+              }
+              question.finalTranscript = question.transcript || '';
+              console.log(`⚠️ [Gemini Audio] No conversation turns found, using Gemini transcript only`);
             }
+            
             // Save token usage
             question.token_usage = response.token_usage || question.token_usage || { input_tokens: 0, output_tokens: 0 };
             // Mark as answered
@@ -371,21 +395,13 @@ io.on('connection', (socket) => {
               question.answeredAt = new Date();
             }
             
-            // Phase 3: Track video segment end time and aggregate transcript
+            // Phase 3: Track video segment end time
             const now = Date.now();
             const sessionStartTime = interview.startedAt ? interview.startedAt.getTime() : now;
             if (!question.videoSegment) {
               question.videoSegment = {};
             }
             question.videoSegment.endTime = now - sessionStartTime; // Relative to session start
-            
-            // Phase 3: Aggregate final transcript from conversation turns
-            if (question.conversationTurns && question.conversationTurns.length > 0) {
-              question.aggregateTranscript();
-            } else {
-              // Fallback to regular transcript if no conversation turns
-              question.finalTranscript = question.transcript || '';
-            }
           }
           
           await interview.save();

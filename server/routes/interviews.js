@@ -947,27 +947,48 @@ router.post('/:id/questions/:questionId/answer', requireRole(['candidate']), [
       }
       // Always update videoUrl - this is critical for per-question video recording
       question.videoUrl = normalizedVideoUrl; // Use normalized value (null if empty)
-      question.transcript = transcript || geminiResponse?.transcript || question.transcript;
+      
+      // Phase 3: Extract candidate transcript from conversation turns (preserve actual speech)
+      // This ensures we save the candidate's actual speech, not Gemini's processed version
+      if (question.conversationTurns && question.conversationTurns.length > 0) {
+        // Extract candidate-only transcript using helper method
+        const candidateTranscript = question.extractCandidateTranscript();
+        
+        // Save the actual candidate transcript (from speech recognition)
+        if (candidateTranscript) {
+          question.transcript = candidateTranscript;
+          console.log(`✅ [Submit Answer] Saved candidate transcript (${candidateTranscript.length} chars) from conversation turns`);
+        } else if (transcript) {
+          // Fallback to provided transcript
+          question.transcript = transcript;
+          console.log(`⚠️ [Submit Answer] Using provided transcript (no candidate turns found)`);
+        } else if (geminiResponse?.transcript) {
+          // Last fallback to Gemini's transcript
+          question.transcript = geminiResponse.transcript;
+          console.log(`⚠️ [Submit Answer] Using Gemini transcript as fallback`);
+        }
+        
+        // Generate full conversation transcript (bot + candidate)
+        question.aggregateTranscript();
+      } else {
+        // No conversation turns - use provided transcript or Gemini's
+        question.transcript = transcript || geminiResponse?.transcript || question.transcript;
+        question.finalTranscript = question.transcript || '';
+        console.log(`⚠️ [Submit Answer] No conversation turns found, using provided/Gemini transcript`);
+      }
+      
       question.evaluation = geminiResponse?.evaluation || question.evaluation;
       question.cheating = geminiResponse?.cheating || question.cheating;
       question.token_usage = geminiResponse?.token_usage || question.token_usage;
       question.answeredAt = new Date();
       
-      // Phase 3: Track video segment end time and aggregate transcript
+      // Phase 3: Track video segment end time
       const now = Date.now();
       const sessionStartTime = interview.startedAt ? interview.startedAt.getTime() : now;
       if (!question.videoSegment) {
         question.videoSegment = {};
       }
       question.videoSegment.endTime = now - sessionStartTime; // Relative to session start
-      
-      // Phase 3: Aggregate final transcript from conversation turns
-      if (question.conversationTurns && question.conversationTurns.length > 0) {
-        question.aggregateTranscript();
-      } else {
-        // Fallback to regular transcript if no conversation turns
-        question.finalTranscript = question.transcript || '';
-      }
     }
 
     // Update total token usage with actual values

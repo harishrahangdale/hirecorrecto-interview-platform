@@ -504,6 +504,24 @@ interviewSchema.methods.calculateTokenUsage = function() {
   };
 };
 
+// Phase 3: Extract candidate-only transcript from conversation turns
+questionSchema.methods.extractCandidateTranscript = function() {
+  if (!this.conversationTurns || this.conversationTurns.length === 0) {
+    // Fallback to regular transcript if no conversation turns
+    return this.transcript || '';
+  }
+
+  // Extract only candidate turns and combine them
+  const candidateTurns = this.conversationTurns
+    .filter(turn => turn.speaker === 'candidate')
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map(turn => turn.text || turn.transcript || '')
+    .filter(text => text.trim().length > 0);
+  
+  // Combine candidate turns into a single transcript
+  return candidateTurns.join(' ').trim();
+};
+
 // Phase 3: Aggregate transcript from conversation turns
 questionSchema.methods.aggregateTranscript = function() {
   if (!this.conversationTurns || this.conversationTurns.length === 0) {
