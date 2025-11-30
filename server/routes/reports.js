@@ -153,8 +153,10 @@ router.get('/interviews/:id/results', requireRole(['recruiter']), async (req, re
     let stats = {};
     
     if (isCompleted) {
-      // Ensure aggregate scores are calculated if they don't exist
-      if (!interview.aggregateScores || Object.keys(interview.aggregateScores).length === 0) {
+      // Force recalculation if requested via query parameter, or if scores don't exist
+      const forceRecalculate = req.query.recalculate === 'true';
+      if (forceRecalculate || !interview.aggregateScores || Object.keys(interview.aggregateScores).length === 0) {
+        console.log(`Recalculating aggregate scores for interview ${interview._id}${forceRecalculate ? ' (forced)' : ''}`);
         interview.calculateAggregateScores();
         // Recalculate if still empty (might be because no questions have evaluations)
         if (!interview.aggregateScores || Object.keys(interview.aggregateScores).length === 0) {
