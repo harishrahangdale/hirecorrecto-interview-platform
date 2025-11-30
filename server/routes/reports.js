@@ -221,6 +221,9 @@ router.get('/interviews/:id/results', requireRole(['recruiter']), async (req, re
             answeredAt: q.answeredAt
           });
           
+          // Determine if question was actually answered
+          const isAnswered = !!(q.answeredAt && q.evaluation && q.evaluation.overall_score !== undefined);
+          
           return {
             id: q.id,
             text: q.text,
@@ -236,7 +239,8 @@ router.get('/interviews/:id/results', requireRole(['recruiter']), async (req, re
             evaluation: q.evaluation || null,
             cheating: q.cheating || null,
             token_usage: q.token_usage || null,
-            answeredAt: q.answeredAt || null
+            answeredAt: q.answeredAt || null,
+            isAnswered: isAnswered // Flag to indicate if question was actually answered
           };
         }),
         aggregateScores: aggregateScores,
@@ -457,8 +461,20 @@ router.get('/interviews/:id/export/json', requireRole(['recruiter']), async (req
 
 // Helper function to calculate interview statistics
 function calculateInterviewStats(interview) {
-  const answeredQuestions = interview.questions.filter(q => q.answeredAt);
-  const totalQuestions = interview.questions.length;
+  // Only count questions that were actually answered (have answeredAt AND evaluation)
+  // This filters out questions that were generated but never actually asked/answered
+  const answeredQuestions = interview.questions.filter(q => 
+    q.answeredAt && 
+    q.evaluation && 
+    q.evaluation.overall_score !== undefined &&
+    q.evaluation.overall_score !== null
+  );
+  // Total questions asked (including those that weren't answered)
+  const totalQuestionsAsked = interview.questions.length;
+  // Total questions that were actually answered
+  const totalQuestionsAnswered = answeredQuestions.length;
+  
+  console.log(`[Statistics] Interview ${interview._id}: ${totalQuestionsAsked} total questions, ${totalQuestionsAnswered} answered`);
   
   // Calculate skill-wise statistics
   const skillStats = {};
@@ -536,9 +552,10 @@ function calculateInterviewStats(interview) {
   });
   
   const stats = {
-    totalQuestions,
+    totalQuestions: totalQuestionsAsked,
+    totalQuestionsAnswered: totalQuestionsAnswered,
     answeredQuestions: answeredQuestions.length,
-    completionRate: totalQuestions > 0 ? (answeredQuestions.length / totalQuestions) * 100 : 0,
+    completionRate: totalQuestionsAsked > 0 ? (answeredQuestions.length / totalQuestionsAsked) * 100 : 0,
     averageScores: {
       relevance: 0,
       technical_accuracy: 0,

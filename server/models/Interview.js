@@ -456,9 +456,23 @@ interviewSchema.pre('save', function(next) {
 
 // Calculate aggregate scores
 interviewSchema.methods.calculateAggregateScores = function() {
-  const answeredQuestions = this.questions.filter(q => q.evaluation && q.evaluation.overall_score !== undefined);
+  // Only count questions that were actually answered (have answeredAt AND evaluation)
+  const answeredQuestions = this.questions.filter(q => 
+    q.answeredAt && 
+    q.evaluation && 
+    q.evaluation.overall_score !== undefined &&
+    q.evaluation.overall_score !== null
+  );
   
   if (answeredQuestions.length === 0) {
+    // Reset aggregate scores if no valid answered questions
+    this.aggregateScores = {
+      averageRelevance: 0,
+      averageTechnicalAccuracy: 0,
+      averageFluency: 0,
+      overallScore: 0,
+      overallCheatRisk: 0
+    };
     return;
   }
 
